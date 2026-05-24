@@ -8,7 +8,7 @@ from telegram.ext import (
     CallbackQueryHandler, filters, ContextTypes
 )
 import anthropic
-from data_parser.sheets import append_sales_rows, set_active_tab, get_active_tab, list_tabs
+from sheets import append_sales_rows, set_active_tab, get_active_tab, list_tabs
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -97,26 +97,37 @@ def build_preview(rows: list[dict]) -> str:
     return "\n".join(lines)
 
 
+COMMANDS_TEXT = """
+📋 *Daftar perintah:*
+
+*📊 Tab Management*
+`/settab <nama>` — ganti tab aktif (buat baru otomatis jika belum ada)
+`/currenttab` — lihat tab yang sedang aktif
+`/listtabs` — lihat semua tab di spreadsheet
+
+*ℹ️ Lainnya*
+`/start` — pesan sambutan & daftar perintah
+`/help` — cara penggunaan & daftar perintah
+
+*💬 Input Penjualan*
+Kirim pesan biasa (bukan command) untuk mencatat penjualan, contoh:
+`bakso ayam 10 porsi, es teh 20 gelas - Andi`
+`kaos polos 5 pcs - Budi, dari uniqlo`
+Bot akan tampilkan preview dulu sebelum menyimpan ke sheet.
+"""
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 *Halo! Selamat datang di Sales Bot!*\n\n"
-        "Kirim pesan penjualan kamu, contoh:\n"
-        "`bakso ayam 10 porsi, es teh 20 gelas - Andi`\n\n"
-        "Bot akan minta konfirmasi sebelum mencatat ke Google Sheets 📊",
+        "Kirim pesan penjualan kamu dan data akan otomatis masuk ke Google Sheets 📊\n"
+        + COMMANDS_TEXT,
         parse_mode="Markdown"
     )
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "📖 *Cara penggunaan:*\n\n"
-        "Cukup kirim pesan penjualan dalam format bebas, contoh:\n"
-        "• `nasi goreng 15 porsi - Budi`\n"
-        "• `jual 10 bakso sama 5 mie ayam`\n"
-        "• `es teh 20 gelas, jus alpukat 8 gelas - Siti`\n\n"
-        "Bot akan tampilkan preview dulu, lalu kamu konfirmasi ✅ atau batalkan ❌.",
-        parse_mode="Markdown"
-    )
+    await update.message.reply_text(COMMANDS_TEXT, parse_mode="Markdown")
 
 
 async def set_tab(update: Update, context: ContextTypes.DEFAULT_TYPE):

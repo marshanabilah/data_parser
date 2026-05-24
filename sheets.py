@@ -10,7 +10,7 @@ SCOPES = [
 
 SPREADSHEET_ID = os.environ["SPREADSHEET_ID"]
 GOOGLE_CREDENTIALS_JSON = os.environ["GOOGLE_CREDENTIALS_JSON"]
-HEADERS = ["Date", "Item Name", "Quantity", "Name", "Store"]
+HEADERS = ["Date", "Name", "Store", "Item Name", "Quantity"]
 
 STATE_FILE = "/data/active_tab.json"
 DEFAULT_TAB = os.environ.get("SHEET_NAME", "Sales")
