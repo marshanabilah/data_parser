@@ -10,14 +10,20 @@ SCOPES = [
 
 SPREADSHEET_ID = os.environ["SPREADSHEET_ID"]
 GOOGLE_CREDENTIALS_JSON = os.environ["GOOGLE_CREDENTIALS_JSON"]
-HEADERS = ["Date", "Name", "Store", "Item Name", "Quantity"]
+HEADERS = ["Date", "Name", "Store","Item Name", "Quantity"]
 
 STATE_FILE = "/data/active_tab.json"
-DEFAULT_TAB = os.environ.get("SHEET_NAME", "Sales")
+DEFAULT_TAB = "Sales"
 
 
 def _get_gspread_client():
-    creds_dict = json.loads(GOOGLE_CREDENTIALS_JSON)
+    raw = os.environ["GOOGLE_CREDENTIALS_JSON"]
+    # Railway sometimes double-escapes newlines in the private key — fix it
+    raw = raw.replace("\\n", "\n")
+    creds_dict = json.loads(raw)
+    # Also fix the private_key field specifically if it's still escaped
+    if "private_key" in creds_dict:
+        creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
     creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
     return gspread.authorize(creds)
 
