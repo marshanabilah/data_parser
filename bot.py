@@ -80,6 +80,14 @@ def parse_sales_message(message: str) -> list[dict]:
         messages=[{"role": "user", "content": message}]
     )
     raw = response.content[0].text.strip()
+    logger.info(f"Claude raw response: {repr(raw)}")
+
+    # Strip markdown code fences if present (e.g. ```json ... ```)
+    import re
+    raw = re.sub(r"^```(?:json)?\s*", "", raw)
+    raw = re.sub(r"\s*```$", "", raw)
+    raw = raw.strip()
+
     data = json.loads(raw)
     return data
 
