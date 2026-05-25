@@ -1,7 +1,7 @@
 import os
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
@@ -197,7 +197,8 @@ async def handle_sales(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await processing_msg.edit_text("❌ Tidak ada data penjualan yang terdeteksi. Coba kirim ulang.")
             return
 
-        today = datetime.now().strftime("%Y-%m-%d %H:%M")
+        WIB = timezone(timedelta(hours=7))
+        today = datetime.now(WIB).strftime("%Y-%m-%d %H:%M")
         rows = []
         for item in sales_data:
             rows.append({

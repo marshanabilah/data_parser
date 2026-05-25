@@ -13,7 +13,7 @@ SCOPES = [
 
 SPREADSHEET_ID = os.environ["SPREADSHEET_ID"]
 GOOGLE_CREDENTIALS_JSON = os.environ["GOOGLE_CREDENTIALS_JSON"]
-HEADERS = ["Date",  "Name", "Store", "Item Name", "Quantity"]
+HEADERS = ["Date", "Name", "Store", "Item Name", "Quantity"]
 
 STATE_FILE = "/data/active_tab.json"
 DEFAULT_TAB = "Sales"
@@ -87,8 +87,10 @@ def get_sheet():
     except gspread.WorksheetNotFound:
         worksheet = spreadsheet.add_worksheet(title=tab_name, rows=1000, cols=10)
 
-    if not worksheet.get_all_values():
-        worksheet.append_row(HEADERS, value_input_option="USER_ENTERED")
+    # Check first row specifically — add headers if missing or wrong
+    first_row = worksheet.row_values(1)
+    if first_row != HEADERS:
+        worksheet.insert_row(HEADERS, index=1, value_input_option="USER_ENTERED")
 
     return worksheet
 
