@@ -74,7 +74,7 @@ Example output:
 def parse_sales_message(message: str) -> list[dict]:
     """Use Claude to parse the sales message into structured data."""
     response = anthropic_client.messages.create(
-        model="claude-sonnet-4-20250514",
+        model="claude-sonnet-4-5",
         max_tokens=1000,
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": message}]
@@ -278,7 +278,7 @@ def main():
     app.add_handler(CallbackQueryHandler(handle_confirmation))
 
     logger.info("Bot is running...")
-    app.run_polling()
+    app.run_polling(drop_pending_updates=True)
 
 
 if __name__ == "__main__":
