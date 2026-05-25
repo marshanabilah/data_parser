@@ -1,7 +1,10 @@
 import os
 import json
+import logging
 import gspread
 from google.oauth2.service_account import Credentials
+
+logger = logging.getLogger(__name__)
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -10,20 +13,38 @@ SCOPES = [
 
 SPREADSHEET_ID = os.environ["SPREADSHEET_ID"]
 GOOGLE_CREDENTIALS_JSON = os.environ["GOOGLE_CREDENTIALS_JSON"]
-HEADERS = ["Date", "Name", "Store","Item Name", "Quantity"]
+HEADERS = ["Date",  "Name", "Store", "Item Name", "Quantity"]
 
 STATE_FILE = "/data/active_tab.json"
 DEFAULT_TAB = "Sales"
 
 
-def _get_gspread_client():
+def _parse_credentials() -> dict:
+    """Parse Google credentials JSON robustly."""
+    import re
     raw = os.environ["GOOGLE_CREDENTIALS_JSON"]
-    # Railway sometimes double-escapes newlines in the private key — fix it
-    raw = raw.replace("\\n", "\n")
-    creds_dict = json.loads(raw)
-    # Also fix the private_key field specifically if it's still escaped
+    logger.info(f"Credentials raw length: {len(raw)}, first 50 chars: {repr(raw[:50])}")
+
+    try:
+        creds_dict = json.loads(raw)
+        logger.info("Credentials parsed successfully on first attempt")
+    except json.JSONDecodeError as e:
+        logger.warning(f"First parse failed: {e}, attempting sanitization...")
+        raw = re.sub(r'(?<!\\)\n', '\\n', raw)
+        raw = re.sub(r'(?<!\\)\r', '\\r', raw)
+        raw = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', '', raw)
+        creds_dict = json.loads(raw)
+        logger.info("Credentials parsed successfully after sanitization")
+
     if "private_key" in creds_dict:
         creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
+        logger.info("Private key newlines fixed")
+
+    return creds_dict
+
+
+def _get_gspread_client():
+    creds_dict = _parse_credentials()
     creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
     return gspread.authorize(creds)
 
