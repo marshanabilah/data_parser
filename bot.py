@@ -1,6 +1,8 @@
 import os
 import json
 import logging
+import secrets
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -8,6 +10,11 @@ from telegram.ext import (
     CallbackQueryHandler, filters, ContextTypes
 )
 import anthropic
+import uvicorn
+from starlette.applications import Starlette
+from starlette.requests import Request
+from starlette.responses import JSONResponse, Response
+from starlette.routing import Route
 from sheets import append_sales_rows, set_active_tab, get_active_tab, list_tabs
 
 logging.basicConfig(
@@ -18,6 +25,10 @@ logger = logging.getLogger(__name__)
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
+WEBHOOK_BASE_URL = os.environ.get("WEBHOOK_BASE_URL", "").rstrip("/")
+WEBHOOK_PATH = os.environ.get("WEBHOOK_PATH", "telegram")
+TELEGRAM_WEBHOOK_SECRET = os.environ.get("TELEGRAM_WEBHOOK_SECRET")
+PORT = int(os.environ.get("PORT", "8080"))
 
 anthropic_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
@@ -275,7 +286,8 @@ async def handle_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
 
 
-def main():
+def build_telegram_application():
+    """Build the Telegram application and register all bot handlers."""
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
@@ -285,9 +297,71 @@ def main():
     app.add_handler(CommandHandler("listtabs", list_tabs_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_sales))
     app.add_handler(CallbackQueryHandler(handle_confirmation))
+    return app
 
-    logger.info("Bot is running...")
-    app.run_polling(drop_pending_updates=True)
+
+def build_web_application(telegram_app):
+    """Build the HTTP application that receives Telegram webhook updates."""
+
+    @asynccontextmanager
+    async def lifespan(_app):
+        async with telegram_app:
+            await telegram_app.start()
+            if WEBHOOK_BASE_URL:
+                await telegram_app.bot.set_webhook(
+                    url=f"{WEBHOOK_BASE_URL}/{WEBHOOK_PATH}",
+                    secret_token=TELEGRAM_WEBHOOK_SECRET,
+                    drop_pending_updates=True,
+                )
+                logger.info("Telegram webhook registered")
+            else:
+                logger.warning(
+                    "WEBHOOK_BASE_URL is not set; HTTP server is ready but "
+                    "the Telegram webhook was not registered"
+                )
+            yield
+            await telegram_app.stop()
+
+    async def health(_request: Request):
+        return JSONResponse({"status": "ok"})
+
+    async def telegram_webhook(request: Request):
+        if TELEGRAM_WEBHOOK_SECRET:
+            supplied_secret = request.headers.get(
+                "X-Telegram-Bot-Api-Secret-Token", ""
+            )
+            if not secrets.compare_digest(supplied_secret, TELEGRAM_WEBHOOK_SECRET):
+                return Response(status_code=403)
+
+        try:
+            update = Update.de_json(await request.json(), telegram_app.bot)
+        except (json.JSONDecodeError, ValueError):
+            return Response(status_code=400)
+
+        # Finish processing before returning the HTTP response. Cloud Run may
+        # suspend CPU after the request ends when min instances is zero.
+        await telegram_app.process_update(update)
+        return Response(status_code=200)
+
+    return Starlette(
+        routes=[
+            Route("/", health, methods=["GET"]),
+            Route(f"/{WEBHOOK_PATH}", telegram_webhook, methods=["POST"]),
+        ],
+        lifespan=lifespan,
+    )
+
+
+def main():
+    if not TELEGRAM_WEBHOOK_SECRET:
+        raise RuntimeError("TELEGRAM_WEBHOOK_SECRET is required")
+
+    logger.info("Bot HTTP server is starting on port %s", PORT)
+    uvicorn.run(
+        build_web_application(build_telegram_application()),
+        host="0.0.0.0",
+        port=PORT,
+    )
 
 
 if __name__ == "__main__":
