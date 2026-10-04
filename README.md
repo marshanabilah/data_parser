@@ -1,82 +1,105 @@
 # 📊 Sales Telegram Bot
 
-Kirim pesan penjualan melalui Telegram, periksa hasil parsing, lalu simpan ke
-Google Sheets. Bot memakai Claude untuk mengubah teks bebas menjadi data
-terstruktur dan berjalan sebagai webhook di Google Cloud Run.
+Send sales messages through Telegram, review the parsed result, and save it to
+Google Sheets. The bot uses Claude to turn free-form text into structured data
+and runs as a webhook service on Google Cloud Run.
 
-## Arsitektur
+## Architecture
 
 ```text
 Telegram Bot API
        │ HTTPS webhook
        ▼
-Google Cloud Run (scale to zero)
-       ├── Claude API — parsing teks
-       └── Google Sheets API — penyimpanan data
+Google Cloud Run (scales to zero)
+       ├── Claude API — text parsing
+       └── Google Sheets API — data storage
 ```
 
-Cloud Run tidak perlu terus berjalan saat bot tidak digunakan. Untuk penggunaan
-ringan, workload ini biasanya tetap berada dalam free tier Cloud Run. Biaya API
-Claude tetap terpisah.
+Cloud Run does not need to keep an instance running while the bot is idle. For
+light usage, this workload will typically remain within the Cloud Run free tier.
+Claude API usage is billed separately.
 
-## Fitur
+## Features
 
-- Parsing pesan penjualan berbahasa Indonesia atau Inggris
-- Preview dan tombol konfirmasi sebelum data disimpan
-- Pencatatan tanggal dalam zona waktu WIB
-- Pemilihan tab spreadsheet melalui `/settab`
-- Konfigurasi tab aktif tersimpan di worksheet tersembunyi `_BotConfig`
-- Endpoint webhook dilindungi secret header Telegram
+- Parses sales messages in Indonesian or English
+- Shows a preview with confirmation buttons before saving
+- Records timestamps in the WIB time zone
+- Switches spreadsheet tabs using `/settab`
+- Stores the active-tab setting in a hidden `_BotConfig` worksheet
+- Restricts the bot to an allowlist of Telegram user IDs
+- Protects the webhook using Telegram's secret-token header
 
-## 1. Buat Telegram Bot
+## 1. Create a Telegram bot
 
-1. Buka Telegram dan cari **@BotFather**.
-2. Kirim `/newbot` dan ikuti instruksinya.
-3. Simpan bot token yang diberikan.
+1. Open Telegram and find **@BotFather**.
+2. Send `/newbot` and follow the instructions.
+3. Save the bot token that BotFather provides.
 
-## 2. Siapkan Google Sheets
+## 2. Prepare Google Sheets
 
-1. Buat Google Sheet baru dan salin spreadsheet ID dari URL-nya.
-2. Di Google Cloud Console, aktifkan Google Sheets API dan Google Drive API.
-3. Buat service account dan unduh key berformat JSON.
-4. Share spreadsheet ke `client_email` service account dengan akses Editor.
+1. Create a Google Sheet and copy the spreadsheet ID from its URL.
+2. In Google Cloud Console, enable the Google Sheets API and Google Drive API.
+3. Create a service account and download its JSON key.
+4. Share the spreadsheet with the service account's `client_email` and grant
+   Editor access.
 
-Bot akan membuat tab `Sales` dan worksheet tersembunyi `_BotConfig` jika belum
-tersedia.
+The bot creates the `Sales` tab and hidden `_BotConfig` worksheet when needed.
 
-## 3. Konfigurasi
+## 3. Configure the bot
 
-Environment variables yang digunakan:
+The application uses these environment variables:
 
-| Variable | Wajib | Keterangan |
+| Variable | Required | Description |
 |---|---:|---|
-| `TELEGRAM_TOKEN` | Ya | Token dari BotFather |
-| `ANTHROPIC_API_KEY` | Ya | API key Anthropic |
-| `SPREADSHEET_ID` | Ya | ID Google Spreadsheet |
-| `GOOGLE_CREDENTIALS_JSON` | Ya | Seluruh isi JSON service account |
-| `TELEGRAM_WEBHOOK_SECRET` | Ya | String acak untuk memverifikasi request Telegram |
-| `WEBHOOK_BASE_URL` | Setelah deploy | URL service Cloud Run, tanpa trailing slash |
-| `WEBHOOK_PATH` | Tidak | Path webhook; default `telegram` |
-| `PORT` | Otomatis | Diisi oleh Cloud Run; default lokal `8080` |
+| `TELEGRAM_TOKEN` | Yes | Token provided by BotFather |
+| `ANTHROPIC_API_KEY` | Yes | Anthropic API key |
+| `SPREADSHEET_ID` | Yes | Google Spreadsheet ID |
+| `GOOGLE_CREDENTIALS_JSON` | Yes | Complete service-account JSON document |
+| `TELEGRAM_WEBHOOK_SECRET` | Yes | Random secret used to verify Telegram webhook requests |
+| `ALLOWED_TELEGRAM_USER_IDS` | Yes | Comma-separated Telegram user IDs allowed to use the bot |
+| `WEBHOOK_BASE_URL` | After first deployment | Cloud Run service URL without a trailing slash |
+| `WEBHOOK_PATH` | No | Webhook path; defaults to `telegram` |
+| `PORT` | Automatic | Supplied by Cloud Run; defaults locally to `8080` |
 
-Contoh nama variable tersedia di `.env.example`. Jangan commit nilai rahasia.
+Variable names and placeholder values are available in `.env.example`. Never
+commit real credentials or API keys.
 
-Untuk membuat webhook secret:
+Create a webhook secret with:
 
 ```bash
 openssl rand -hex 32
 ```
 
-## 4. Deploy ke Google Cloud Run
+### Configure access control
 
-Deploy pertama belum memerlukan `WEBHOOK_BASE_URL`. Aplikasi akan melayani HTTP,
-tetapi belum mendaftarkan webhook sampai URL tersebut ditambahkan.
+`ALLOWED_TELEGRAM_USER_IDS` is a fail-closed allowlist. The application refuses
+to start if the list is missing or empty. Multiple users can be separated with
+commas:
 
-1. Buat project Google Cloud dan aktifkan billing, Cloud Run API, Cloud Build API,
-   dan Artifact Registry API.
-2. Salin `.env.example` menjadi `.env`, isi semua variable wajib, dan biarkan
-   `WEBHOOK_BASE_URL` kosong untuk deploy pertama.
-3. Dari folder repository, deploy source:
+```dotenv
+ALLOWED_TELEGRAM_USER_IDS=123456789,987654321
+```
+
+To discover your user ID safely:
+
+1. Temporarily set the allowlist to a known numeric placeholder, such as `0`.
+2. Deploy the bot and send `/start` to it.
+3. The access-denied reply displays your own Telegram user ID.
+4. Replace the placeholder with that ID and deploy again.
+
+The allowlist uses **user IDs**, not usernames or chat IDs. It protects normal
+messages, commands, and confirmation-button callbacks.
+
+## 4. Deploy to Google Cloud Run
+
+The first deployment does not require `WEBHOOK_BASE_URL`. The service starts its
+HTTP server but does not register a Telegram webhook until that URL is set.
+
+1. Create a Google Cloud project and enable billing, the Cloud Run API, Cloud
+   Build API, and Artifact Registry API.
+2. Copy `.env.example` to `.env`, fill in every required variable, and leave
+   `WEBHOOK_BASE_URL` empty for the first deployment.
+3. From the repository directory, deploy the source:
 
    ```bash
    gcloud run deploy sales-telegram-bot \
@@ -88,40 +111,41 @@ tetapi belum mendaftarkan webhook sampai URL tersebut ditambahkan.
      --env-vars-file .env
    ```
 
-4. Salin URL service yang ditampilkan, misalnya
-   `https://sales-telegram-bot-xxxxx.asia-southeast2.run.app`, dan simpan sebagai
-   `WEBHOOK_BASE_URL` di `.env`.
-5. Jalankan perintah deploy yang sama sekali lagi. Saat revision baru startup,
-   bot otomatis mendaftarkan URL webhook ke Telegram.
+4. Copy the displayed service URL, such as
+   `https://sales-telegram-bot-xxxxx.asia-southeast2.run.app`, and save it as
+   `WEBHOOK_BASE_URL` in `.env`.
+5. Run the same deployment command again. When the new revision starts, the bot
+   automatically registers its webhook with Telegram.
 
-Untuk production, simpan token, API key, dan credentials JSON di Google Secret
-Manager lalu hubungkan secret tersebut sebagai environment variables Cloud Run.
+For production, store the Telegram token, Anthropic key, webhook secret, and
+service-account JSON in Google Secret Manager, then expose those secrets to the
+Cloud Run container as environment variables.
 
-### Verifikasi deployment
+### Verify the deployment
 
-Endpoint root harus mengembalikan `{"status":"ok"}`:
+The root endpoint should return `{"status":"ok"}`:
 
 ```bash
 curl https://YOUR-SERVICE-URL.run.app/
 ```
 
-Kemudian kirim pesan berikut ke bot:
+Then send a sales message to the Telegram bot:
 
 ```text
 bakso ayam 10 porsi, es teh 20 gelas - Andi
 ```
 
-## Penggunaan
+## Usage
 
-| Perintah | Fungsi |
+| Command | Purpose |
 |---|---|
-| `/start` | Sambutan dan daftar perintah |
-| `/help` | Panduan penggunaan |
-| `/settab <nama>` | Pilih tab aktif; tab dibuat ketika data pertama disimpan |
-| `/currenttab` | Tampilkan tab aktif |
-| `/listtabs` | Tampilkan semua tab data |
+| `/start` | Show the welcome message and command list |
+| `/help` | Show usage help |
+| `/settab <name>` | Select the active tab; it is created when data is first saved |
+| `/currenttab` | Show the active tab |
+| `/listtabs` | List all data tabs |
 
-Contoh input:
+Example messages:
 
 ```text
 kaos polos 5 pcs sama celana jeans 3 - Andi, dari uniqlo
@@ -129,26 +153,26 @@ vitamin c 10, sabun muka 5 - Siti
 beras 5kg, minyak goreng 3 botol - Budi
 ```
 
-## Kolom Google Sheets
+## Google Sheets columns
 
 | Date | Name | Store | Item Name | Quantity |
 |---|---|---|---|---:|
 | 2026-05-24 14:30 | Andi | Supermarket | Bakso Ayam | 10 |
 
-## Menjalankan secara lokal
+## Run locally
 
-Webhook lokal memerlukan URL HTTPS publik, misalnya melalui tunnel. Instal
-dependency dan export variable dari `.env.example`, lalu jalankan:
+A local webhook requires a public HTTPS URL, usually provided through a tunnel.
+Install the dependencies, export the variables from `.env.example`, and run:
 
 ```bash
 python -m pip install -r requirements.txt
 python bot.py
 ```
 
-Set `WEBHOOK_BASE_URL` ke URL HTTPS tunnel. Health endpoint tersedia di port
-`8080` secara default.
+Set `WEBHOOK_BASE_URL` to the public HTTPS tunnel URL. The health endpoint uses
+port `8080` by default.
 
-## Struktur
+## Project structure
 
 ```text
 .
@@ -163,11 +187,13 @@ Set `WEBHOOK_BASE_URL` ke URL HTTPS tunnel. Health endpoint tersedia di port
 
 ## Troubleshooting
 
-- **Container gagal startup:** pastikan seluruh variable wajib kecuali
-  `WEBHOOK_BASE_URL` tersedia dan JSON service account valid.
-- **Bot tidak merespons:** pastikan `WEBHOOK_BASE_URL` sama dengan URL service dan
-  revision terbaru berhasil dijalankan.
-- **Google Sheets gagal:** pastikan spreadsheet sudah di-share ke email service
-  account dengan akses Editor.
-- **Webhook mendapat 403:** pastikan `TELEGRAM_WEBHOOK_SECRET` tidak diubah tanpa
-  menjalankan revision baru agar webhook didaftarkan ulang.
+- **Container fails to start:** verify that all required variables except
+  `WEBHOOK_BASE_URL` are present and that the service-account JSON is valid.
+- **`ALLOWED_TELEGRAM_USER_IDS` error:** use numeric user IDs separated by commas;
+  do not use `@usernames`.
+- **Bot does not respond:** verify that `WEBHOOK_BASE_URL` exactly matches the
+  Cloud Run service URL and that the latest revision deployed successfully.
+- **Google Sheets fails:** verify that the spreadsheet was shared with the
+  service account using Editor access.
+- **Webhook returns 403:** if `TELEGRAM_WEBHOOK_SECRET` changed, deploy a new
+  revision so the bot can register the updated secret with Telegram.

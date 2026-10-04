@@ -7,7 +7,8 @@ from datetime import datetime, timezone, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
-    CallbackQueryHandler, filters, ContextTypes
+    CallbackQueryHandler, TypeHandler, ApplicationHandlerStop,
+    filters, ContextTypes
 )
 import anthropic
 import uvicorn
@@ -28,9 +29,24 @@ ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
 WEBHOOK_BASE_URL = os.environ.get("WEBHOOK_BASE_URL", "").rstrip("/")
 WEBHOOK_PATH = os.environ.get("WEBHOOK_PATH", "telegram")
 TELEGRAM_WEBHOOK_SECRET = os.environ.get("TELEGRAM_WEBHOOK_SECRET")
+ALLOWED_TELEGRAM_USER_IDS_RAW = os.environ.get("ALLOWED_TELEGRAM_USER_IDS", "")
 PORT = int(os.environ.get("PORT", "8080"))
 
 anthropic_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+
+
+def parse_allowed_user_ids(raw_value: str) -> frozenset[int]:
+    """Parse a comma-separated Telegram user ID allowlist."""
+    values = [value.strip() for value in raw_value.split(",") if value.strip()]
+    try:
+        return frozenset(int(value) for value in values)
+    except ValueError as exc:
+        raise RuntimeError(
+            "ALLOWED_TELEGRAM_USER_IDS must contain comma-separated integers"
+        ) from exc
+
+
+ALLOWED_TELEGRAM_USER_IDS = parse_allowed_user_ids(ALLOWED_TELEGRAM_USER_IDS_RAW)
 
 SYSTEM_PROMPT = """You are a sales data parser for a retail business with multiple store types.
 The user will send you a message describing their daily sales.
@@ -134,6 +150,32 @@ Kirim pesan biasa (bukan command) untuk mencatat penjualan, contoh:
 `kaos polos 5 pcs - Budi, dari uniqlo`
 Bot akan tampilkan preview dulu sebelum menyimpan ke sheet.
 """
+
+
+async def enforce_access(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Stop updates from Telegram users who are not on the allowlist."""
+    del context
+    user = update.effective_user
+    if user and user.id in ALLOWED_TELEGRAM_USER_IDS:
+        return
+
+    user_id = user.id if user else "unknown"
+    logger.warning("Rejected Telegram update from unauthorized user ID %s", user_id)
+
+    if update.callback_query:
+        await update.callback_query.answer(
+            f"Access denied. Your Telegram user ID is {user_id}.",
+            show_alert=True,
+        )
+    elif update.effective_message:
+        await update.effective_message.reply_text(
+            "⛔ Access denied.\n\n"
+            f"Your Telegram user ID is `{user_id}`. Ask the bot administrator "
+            "to add it to `ALLOWED_TELEGRAM_USER_IDS`.",
+            parse_mode="Markdown",
+        )
+
+    raise ApplicationHandlerStop
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -290,6 +332,9 @@ def build_telegram_application():
     """Build the Telegram application and register all bot handlers."""
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
+    # Group -1 always runs before the bot's functional handlers. Unauthorized
+    # updates are stopped here, including commands and callback buttons.
+    app.add_handler(TypeHandler(Update, enforce_access), group=-1)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("settab", set_tab))
@@ -355,6 +400,8 @@ def build_web_application(telegram_app):
 def main():
     if not TELEGRAM_WEBHOOK_SECRET:
         raise RuntimeError("TELEGRAM_WEBHOOK_SECRET is required")
+    if not ALLOWED_TELEGRAM_USER_IDS:
+        raise RuntimeError("ALLOWED_TELEGRAM_USER_IDS must contain at least one user ID")
 
     logger.info("Bot HTTP server is starting on port %s", PORT)
     uvicorn.run(
