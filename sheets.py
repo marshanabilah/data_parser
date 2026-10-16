@@ -1,130 +1,246 @@
-import os
 import json
-import logging
+import os
+import threading
+from datetime import datetime
+from typing import Any, Callable, Dict, Iterable, Optional, Sequence, Tuple
+from zoneinfo import ZoneInfo
+
 import gspread
 from google.oauth2.service_account import Credentials
 
-logger = logging.getLogger(__name__)
+from models import OrderDraft, SavedOrder
 
-SCOPES = [
+
+SCOPES = (
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
-]
-
-SPREADSHEET_ID = os.environ["SPREADSHEET_ID"]
-GOOGLE_CREDENTIALS_JSON = os.environ["GOOGLE_CREDENTIALS_JSON"]
-HEADERS = ["Date", "Name", "Store", "Item Name", "Quantity"]
-
-DEFAULT_TAB = "Sales"
+)
+ORDERS_TAB = "Orders"
 CONFIG_TAB = "_BotConfig"
+ORDER_HEADERS = (
+    "Date",
+    "Order No.",
+    "DN Line",
+    "Items",
+    "Link",
+    "Nominal",
+    "Arrived Date",
+    "Status",
+    "Box",
+)
+CONFIG_HEADERS = ("Setting", "Value")
+NEXT_ORDER_KEY = "next_order_no"
+SUBMISSION_KEY_PREFIX = "submission:"
+WIB = ZoneInfo("Asia/Jakarta")
 
 
-def _parse_credentials() -> dict:
-    """Parse Google credentials JSON robustly."""
-    import re
-    raw = os.environ["GOOGLE_CREDENTIALS_JSON"]
-    logger.info(f"Credentials raw length: {len(raw)}, first 50 chars: {repr(raw[:50])}")
+class SheetRepositoryError(RuntimeError):
+    pass
 
+
+class SheetSchemaError(SheetRepositoryError):
+    pass
+
+
+def _parse_credentials(raw: str) -> Dict[str, Any]:
     try:
-        creds_dict = json.loads(raw)
-        logger.info("Credentials parsed successfully on first attempt")
-    except json.JSONDecodeError as e:
-        logger.warning(f"First parse failed: {e}, attempting sanitization...")
-        raw = re.sub(r'(?<!\\)\n', '\\n', raw)
-        raw = re.sub(r'(?<!\\)\r', '\\r', raw)
-        raw = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', '', raw)
-        creds_dict = json.loads(raw)
-        logger.info("Credentials parsed successfully after sanitization")
-
-    if "private_key" in creds_dict:
-        creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
-        logger.info("Private key newlines fixed")
-
-    return creds_dict
+        credentials = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise SheetRepositoryError("Google credentials are not valid JSON") from exc
+    private_key = credentials.get("private_key")
+    if isinstance(private_key, str):
+        credentials["private_key"] = private_key.replace("\\n", "\n")
+    return credentials
 
 
-def _get_gspread_client():
-    creds_dict = _parse_credentials()
-    creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
-    return gspread.authorize(creds)
-
-
-def _get_spreadsheet():
-    """Open the configured spreadsheet."""
-    return _get_gspread_client().open_by_key(SPREADSHEET_ID)
-
-
-def _get_config_sheet():
-    """Return the hidden worksheet used for durable bot configuration."""
-    spreadsheet = _get_spreadsheet()
-    try:
-        worksheet = spreadsheet.worksheet(CONFIG_TAB)
-    except gspread.WorksheetNotFound:
-        worksheet = spreadsheet.add_worksheet(title=CONFIG_TAB, rows=10, cols=2)
-        worksheet.update(
-            [["Setting", "Value"], ["active_tab", DEFAULT_TAB]],
-            range_name="A1:B2",
+def spreadsheet_from_environment() -> Any:
+    spreadsheet_id = os.environ.get("SPREADSHEET_ID", "").strip()
+    raw_credentials = os.environ.get("GOOGLE_CREDENTIALS_JSON", "")
+    if not spreadsheet_id or not raw_credentials:
+        raise SheetRepositoryError(
+            "SPREADSHEET_ID and GOOGLE_CREDENTIALS_JSON are required"
         )
-        worksheet.hide()
-    return worksheet
+    credentials = Credentials.from_service_account_info(
+        _parse_credentials(raw_credentials),
+        scopes=SCOPES,
+    )
+    return gspread.authorize(credentials).open_by_key(spreadsheet_id)
 
 
-# ── Active tab persistence ─────────────────────────────────────────────────
+class OrdersRepository:
+    def __init__(
+        self,
+        spreadsheet: Any,
+        now: Callable[[], datetime] = lambda: datetime.now(WIB),
+    ) -> None:
+        self._spreadsheet = spreadsheet
+        self._now = now
+        self._lock = threading.Lock()
 
-def get_active_tab() -> str:
-    """Return the currently active tab name."""
+    def ensure_schema(self) -> None:
+        with self._lock:
+            self._ensure_schema_unlocked()
+
+    def find_duplicate_links(self, links: Iterable[str]) -> frozenset[str]:
+        requested = frozenset(links)
+        if not requested:
+            return frozenset()
+        with self._lock:
+            orders, _ = self._ensure_schema_unlocked()
+            rows = orders.get_all_values()
+            existing = {row[4] for row in rows[1:] if len(row) > 4 and row[4]}
+            return frozenset(existing & requested)
+
+    def save_orders(
+        self,
+        drafts: Sequence[OrderDraft],
+        submission_token: str,
+    ) -> Tuple[SavedOrder, ...]:
+        if not drafts:
+            raise SheetRepositoryError("At least one order is required")
+        token = submission_token.strip()
+        if not token:
+            raise SheetRepositoryError("Submission token is required")
+
+        with self._lock:
+            orders, config = self._ensure_schema_unlocked()
+            config_rows = config.get_all_values()
+            settings = _settings_by_key(config_rows)
+            prior = settings.get(f"{SUBMISSION_KEY_PREFIX}{token}")
+            if prior is not None:
+                return _decode_saved_orders(prior)
+
+            order_rows = orders.get_all_values()
+            next_order_no = _next_order_number(settings, order_rows)
+            timestamp = self._now().astimezone(WIB).strftime("%Y-%m-%d %H:%M")
+            saved = tuple(
+                SavedOrder(
+                    date=timestamp,
+                    order_no=next_order_no + index,
+                    dn_line=draft.dn_line,
+                    items=draft.items,
+                    link=draft.link,
+                    nominal=draft.nominal,
+                )
+                for index, draft in enumerate(drafts)
+            )
+
+            order_start = len(order_rows) + 1
+            order_end = order_start + len(saved) - 1
+            next_key_row = _setting_row(config_rows, NEXT_ORDER_KEY)
+            if next_key_row is None:
+                next_key_row = len(config_rows) + 1
+            token_row = max(len(config_rows), next_key_row) + 1
+
+            body = {
+                "valueInputOption": "USER_ENTERED",
+                "data": [
+                    {
+                        "range": f"'{ORDERS_TAB}'!A{order_start}:I{order_end}",
+                        "values": [order.as_sheet_row() for order in saved],
+                    },
+                    {
+                        "range": f"'{CONFIG_TAB}'!A{next_key_row}:B{next_key_row}",
+                        "values": [[NEXT_ORDER_KEY, next_order_no + len(saved)]],
+                    },
+                    {
+                        "range": f"'{CONFIG_TAB}'!A{token_row}:B{token_row}",
+                        "values": [
+                            [
+                                f"{SUBMISSION_KEY_PREFIX}{token}",
+                                json.dumps(
+                                    [order.as_sheet_row() for order in saved],
+                                    ensure_ascii=False,
+                                    separators=(",", ":"),
+                                ),
+                            ]
+                        ],
+                    },
+                ],
+            }
+            self._spreadsheet.values_batch_update(body)
+            return saved
+
+    def _ensure_schema_unlocked(self) -> Tuple[Any, Any]:
+        worksheets = {sheet.title: sheet for sheet in self._spreadsheet.worksheets()}
+        orders = worksheets.get(ORDERS_TAB)
+        if orders is None:
+            orders = self._spreadsheet.add_worksheet(
+                title=ORDERS_TAB,
+                rows=1000,
+                cols=len(ORDER_HEADERS),
+            )
+            orders.update([list(ORDER_HEADERS)], range_name="A1:I1")
+        elif tuple(orders.row_values(1)) != ORDER_HEADERS:
+            raise SheetSchemaError(
+                "Orders worksheet headers do not match the required schema"
+            )
+
+        config = worksheets.get(CONFIG_TAB)
+        if config is None:
+            config = self._spreadsheet.add_worksheet(
+                title=CONFIG_TAB,
+                rows=1000,
+                cols=len(CONFIG_HEADERS),
+            )
+            config.update([list(CONFIG_HEADERS)], range_name="A1:B1")
+            config.hide()
+        elif tuple(config.row_values(1)) != CONFIG_HEADERS:
+            raise SheetSchemaError("_BotConfig headers do not match the required schema")
+        return orders, config
+
+
+def _settings_by_key(rows: Sequence[Sequence[str]]) -> Dict[str, str]:
+    return {row[0]: row[1] for row in rows[1:] if len(row) >= 2 and row[0]}
+
+
+def _setting_row(rows: Sequence[Sequence[str]], key: str) -> Optional[int]:
+    for index, row in enumerate(rows[1:], start=2):
+        if row and row[0] == key:
+            return index
+    return None
+
+
+def _next_order_number(
+    settings: Dict[str, str],
+    order_rows: Sequence[Sequence[str]],
+) -> int:
+    configured = settings.get(NEXT_ORDER_KEY)
+    if configured is not None:
+        try:
+            value = int(configured)
+        except (TypeError, ValueError) as exc:
+            raise SheetRepositoryError("next_order_no is not a valid integer") from exc
+        if value < 1:
+            raise SheetRepositoryError("next_order_no must be positive")
+        return value
+
+    existing = []
+    for row in order_rows[1:]:
+        if len(row) > 1:
+            try:
+                existing.append(int(row[1]))
+            except (TypeError, ValueError):
+                continue
+    return max(existing, default=0) + 1
+
+
+def _decode_saved_orders(value: str) -> Tuple[SavedOrder, ...]:
     try:
-        value = _get_config_sheet().acell("B2").value
-        return value.strip() if value and value.strip() else DEFAULT_TAB
-    except Exception as exc:
-        logger.warning("Could not read active tab configuration: %s", exc)
-        return DEFAULT_TAB
-
-
-def set_active_tab(tab_name: str):
-    """Persist a new tab name in the spreadsheet configuration."""
-    _get_config_sheet().update_acell("B2", tab_name)
-
-
-def list_tabs() -> list[str]:
-    """Return all existing tab names in the spreadsheet."""
-    spreadsheet = _get_spreadsheet()
-    return [
-        ws.title for ws in spreadsheet.worksheets() if ws.title != CONFIG_TAB
-    ]
-
-
-# ── Sheet access ───────────────────────────────────────────────────────────
-
-def get_sheet():
-    """Return the active worksheet, creating it if it doesn't exist."""
-    tab_name = get_active_tab()
-    spreadsheet = _get_spreadsheet()
-
-    try:
-        worksheet = spreadsheet.worksheet(tab_name)
-    except gspread.WorksheetNotFound:
-        worksheet = spreadsheet.add_worksheet(title=tab_name, rows=1000, cols=10)
-
-    # Check first row specifically — add headers if missing or wrong
-    first_row = worksheet.row_values(1)
-    if first_row != HEADERS:
-        worksheet.insert_row(HEADERS, index=1, value_input_option="USER_ENTERED")
-
-    return worksheet
-
-
-def append_sales_rows(rows: list[dict]):
-    """Append one or more sales rows to the active tab."""
-    worksheet = get_sheet()
-    data = [
-        [
-            row.get("date", ""),
-            row.get("name", "Unknown"),
-            row.get("store", "Unknown Store"),
-            row.get("item_name", ""),
-            row.get("quantity", 0),
-        ]
-        for row in rows
-    ]
-    worksheet.append_rows(data, value_input_option="USER_ENTERED")
+        rows = json.loads(value)
+        return tuple(
+            SavedOrder(
+                date=row[0],
+                order_no=int(row[1]),
+                dn_line=row[2],
+                items=row[3],
+                link=row[4],
+                nominal=row[5] or None,
+                arrived_date=row[6],
+                status=row[7],
+                box=row[8],
+            )
+            for row in rows
+        )
+    except (IndexError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise SheetRepositoryError("Stored submission record is invalid") from exc

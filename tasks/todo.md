@@ -112,19 +112,19 @@ schema, durable ID reservation, duplicate-link lookup, and one-call batch append
 
 **Acceptance criteria:**
 
-- [ ] The repository creates or validates `Orders` with the exact nine headers
+- [x] The repository creates or validates `Orders` with the exact nine headers
   and never modifies existing `Sales` or unrelated tabs.
-- [ ] `_BotConfig` supplies permanent monotonically increasing order-number
+- [x] `_BotConfig` supplies permanent monotonically increasing order-number
   ranges that are not reused after a deleted row.
-- [ ] Duplicate links are reported as warnings, and one Sheets batch update
+- [x] Duplicate links are reported as warnings, and one Sheets batch update
   appends the validated rows, advances the sequence, and records the submission
   token atomically with WIB timestamps and approved defaults.
 
 **Verification:**
 
-- [ ] Tests pass: `.venv/bin/python -m pytest -q tests/test_sheets.py`
-- [ ] Lint passes: `.venv/bin/python -m ruff check sheets.py tests/test_sheets.py`
-- [ ] Concurrent fake-repository tests receive unique, non-overlapping ID ranges.
+- [x] Tests pass: `.venv/bin/python -m pytest -q tests/test_sheets.py`
+- [x] Lint passes: `.venv/bin/python -m ruff check sheets.py tests/test_sheets.py`
+- [x] Concurrent fake-repository tests receive unique, non-overlapping ID ranges.
 
 **Dependencies:** Task 1
 
