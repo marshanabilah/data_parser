@@ -144,18 +144,19 @@ service interface.
 
 **Acceptance criteria:**
 
-- [ ] One service call transforms a valid multi-link message into ordered preview
+- [x] One service call transforms a valid multi-link message into ordered preview
   rows with missing-price and duplicate warnings.
-- [ ] Missing item names, ambiguous DN mappings, and unsafe URLs block the entire
+- [x] Missing item names, ambiguous DN mappings, and unsafe URLs block the entire
   submission before persistence.
-- [ ] Confirmation is idempotent per submission token and saves the complete
+- [x] Confirmation is idempotent per submission token and saves the complete
   validated batch once.
 
 **Verification:**
 
-- [ ] Tests pass: `.venv/bin/python -m pytest -q tests/test_order_service.py`
-- [ ] Lint passes: `.venv/bin/python -m ruff check order_service.py tests/test_order_service.py`
-- [ ] Integration fixture covers valid, unresolved, duplicate, cancel, and retry cases.
+- [x] Tests pass: `.venv/bin/python -m pytest -q tests/test_order_service.py`
+- [x] Lint passes: `.venv/bin/python -m ruff check order_service.py tests/test_order_service.py`
+- [x] Integration fixtures cover valid, unresolved, duplicate, and retry cases;
+  cancellation is covered with the Telegram handler in Task 6.
 
 **Dependencies:** Tasks 2, 3, and 4
 

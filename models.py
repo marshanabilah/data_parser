@@ -137,6 +137,21 @@ class OrderDraft:
 
 
 @dataclass(frozen=True)
+class OrderPreview:
+    submission_token: str
+    orders: Tuple[OrderDraft, ...]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "submission_token",
+            _required_text(self.submission_token, "Submission token", 200),
+        )
+        if not self.orders:
+            raise OrderValidationError("Preview requires at least one order")
+
+
+@dataclass(frozen=True)
 class SavedOrder:
     date: str
     order_no: int
