@@ -176,18 +176,18 @@ tokens.
 
 **Acceptance criteria:**
 
-- [ ] `/start` and `/help` document link, DN, and override usage; sales and tab
+- [x] `/start` and `/help` document link, DN, and override usage; sales and tab
   commands are no longer registered.
-- [ ] Every preview displays all proposed fields, warnings, and only Confirm and
+- [x] Every preview displays all proposed fields, warnings, and only Confirm and
   Cancel actions; stale callbacks cannot confirm a different submission.
-- [ ] Access control runs before parsing or fetching, and user-facing failures
+- [x] Access control runs before parsing or fetching, and user-facing failures
   provide corrective steps without internal exception text.
 
 **Verification:**
 
-- [ ] Tests pass: `.venv/bin/python -m pytest -q tests/test_bot.py`
-- [ ] Lint passes: `.venv/bin/python -m ruff check bot.py tests/test_bot.py`
-- [ ] Integration test covers unauthorized, preview, confirm, cancel, and stale callback updates.
+- [x] Tests pass: `.venv/bin/python -m pytest -q tests/test_bot.py`
+- [x] Lint passes: `.venv/bin/python -m ruff check bot.py tests/test_bot.py`
+- [x] Integration test covers unauthorized, preview, confirm, cancel, and stale callback updates.
 
 **Dependencies:** Task 5
 
@@ -201,10 +201,10 @@ tokens.
 
 ## Checkpoint: Order pipeline
 
-- [ ] Full offline test suite passes.
-- [ ] A fake-sheet end-to-end test writes exact schema rows for multiple links.
-- [ ] Validation failures and cancellation write no order rows.
-- [ ] Concurrent confirmations cannot duplicate order numbers in one running instance.
+- [x] Full offline test suite passes.
+- [x] A fake-sheet end-to-end test writes exact schema rows for multiple links.
+- [x] Validation failures and cancellation write no order rows.
+- [x] Concurrent confirmations cannot duplicate order numbers in one running instance.
 - [ ] Human reviews the end-to-end behavior before operational hardening.
 
 ## Phase 3: Operational hardening and handoff

@@ -50,6 +50,27 @@ class ItemNameFallback(Protocol):
 Resolver = Callable[[str], Awaitable[Tuple[str, ...]]]
 
 
+class PublicProductExtractor:
+    def __init__(
+        self,
+        client: httpx.AsyncClient,
+        *,
+        resolver: Resolver = None,
+        item_fallback: Optional[ItemNameFallback] = None,
+    ) -> None:
+        self._client = client
+        self._resolver = resolver or resolve_host
+        self._item_fallback = item_fallback
+
+    async def extract(self, link: str) -> ExtractedProduct:
+        return await extract_product_metadata(
+            link,
+            client=self._client,
+            resolver=self._resolver,
+            item_fallback=self._item_fallback,
+        )
+
+
 async def resolve_host(hostname: str) -> Tuple[str, ...]:
     loop = asyncio.get_running_loop()
     records = await loop.getaddrinfo(
