@@ -40,18 +40,18 @@ the returned mapping against the original message.
 
 **Acceptance criteria:**
 
-- [ ] Shared DN headings, per-link DN values, ordered pairing, and multiple DNs
+- [x] Shared DN headings, per-link DN values, ordered pairing, and multiple DNs
   in one message produce the expected link drafts.
-- [ ] Explicit `Items:` and `Nominal:` overrides stay attached to the intended
+- [x] Explicit `Items:` and `Nominal:` overrides stay attached to the intended
   link and remain authoritative.
-- [ ] Missing, duplicate, unknown, or ambiguous URL/DN mappings return a clear
+- [x] Missing, duplicate, unknown, or ambiguous URL/DN mappings return a clear
   unresolved result and never fabricate a pairing.
 
 **Verification:**
 
-- [ ] Tests pass: `.venv/bin/python -m pytest -q tests/test_order_parser.py`
-- [ ] Lint passes: `.venv/bin/python -m ruff check order_parser.py tests/test_order_parser.py`
-- [ ] Manual fixture check covers both approved examples from `SPEC.md`.
+- [x] Tests pass: `.venv/bin/python -m pytest -q tests/test_order_parser.py`
+- [x] Lint passes: `.venv/bin/python -m ruff check order_parser.py tests/test_order_parser.py`
+- [x] Manual fixture check covers both approved examples from `SPEC.md`.
 
 **Dependencies:** Task 1
 
