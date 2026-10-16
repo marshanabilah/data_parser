@@ -85,6 +85,24 @@ class SubmittedLink:
 
 
 @dataclass(frozen=True)
+class ExtractedProduct:
+    items: Optional[str]
+    nominal: Optional[str]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "items",
+            _optional_text(self.items, "Items", MAX_ITEMS_LENGTH),
+        )
+        object.__setattr__(
+            self,
+            "nominal",
+            _optional_text(self.nominal, "Nominal", MAX_NOMINAL_LENGTH),
+        )
+
+
+@dataclass(frozen=True)
 class OrderDraft:
     dn_line: str
     link: str

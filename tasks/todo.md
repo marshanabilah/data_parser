@@ -71,18 +71,18 @@ precedence order.
 
 **Acceptance criteria:**
 
-- [ ] JSON-LD, Open Graph, heading, title, and bounded AI fallback precedence is
+- [x] JSON-LD, Open Graph, heading, title, and bounded AI fallback precedence is
   deterministic and preserves original displayed currency text.
-- [ ] Non-HTTPS, non-public IP, unsafe redirect, excessive redirect, oversized
+- [x] Non-HTTPS, non-public IP, unsafe redirect, excessive redirect, oversized
   response, timeout, and non-HTML cases fail with typed errors before unsafe use.
-- [ ] Requests do not forward cookies, authorization, or submitted credentials,
+- [x] Requests do not forward cookies, authorization, or submitted credentials,
   and tests make no live network calls.
 
 **Verification:**
 
-- [ ] Tests pass: `.venv/bin/python -m pytest -q tests/test_link_extractor.py`
-- [ ] Lint passes: `.venv/bin/python -m ruff check link_extractor.py tests/test_link_extractor.py`
-- [ ] Mocked redirect tests prove every destination is revalidated.
+- [x] Tests pass: `.venv/bin/python -m pytest -q tests/test_link_extractor.py`
+- [x] Lint passes: `.venv/bin/python -m ruff check link_extractor.py tests/test_link_extractor.py`
+- [x] Mocked redirect tests prove every destination is revalidated.
 
 **Dependencies:** Task 1
 
@@ -97,10 +97,10 @@ precedence order.
 
 ## Checkpoint: Foundation
 
-- [ ] Tasks 1-3 focused tests pass together.
-- [ ] The approved message examples parse correctly.
-- [ ] All URL safety cases fail closed.
-- [ ] No test performs a live external request.
+- [x] Tasks 1-3 focused tests pass together.
+- [x] The approved message examples parse correctly.
+- [x] All URL safety cases fail closed.
+- [x] No test performs a live external request.
 - [ ] Human reviews the foundation before persistence work begins.
 
 ## Phase 2: Persistence and complete order pipeline
