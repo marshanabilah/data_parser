@@ -217,18 +217,19 @@ single-concurrency sequence constraint.
 
 **Acceptance criteria:**
 
-- [ ] Anthropic and gspread operations run off the event loop while HTTP fetching
+- [x] Anthropic and gspread operations run off the event loop while HTTP fetching
   remains async and bounded.
-- [ ] Logs contain no raw Telegram messages, submitted URLs, scraped content,
+- [x] Logs contain no raw Telegram messages, submitted URLs, scraped content,
   credentials, or model responses.
-- [ ] The container includes all runtime modules, starts on `$PORT`, and the
+- [x] The container includes all runtime modules, starts on `$PORT`, and the
   documented deploy command uses maximum instances `1` and concurrency `1`.
 
 **Verification:**
 
-- [ ] Tests pass: `.venv/bin/python -m pytest -q tests/test_webhook.py tests/test_logging.py`
-- [ ] Compilation succeeds: `.venv/bin/python -m compileall -q bot.py models.py order_parser.py link_extractor.py order_service.py sheets.py`
-- [ ] Container builds: `docker build -t telegram-order-bot:local .`
+- [x] Tests pass: `.venv/bin/python -m pytest -q tests/test_webhook.py tests/test_logging.py`
+- [x] Compilation succeeds: `.venv/bin/python -m compileall -q bot.py models.py order_parser.py link_extractor.py order_service.py sheets.py`
+- [ ] Container builds: `docker build -t telegram-order-bot:local .` (Docker is
+  not installed in the current environment.)
 
 **Dependencies:** Task 6
 
@@ -249,18 +250,18 @@ Cloud Run deployment instructions.
 
 **Acceptance criteria:**
 
-- [ ] README examples cover one shared DN, multiple DNs, multiple links, and
+- [x] README examples cover one shared DN, multiple DNs, multiple links, and
   manual `Items:` and `Nominal:` overrides.
-- [ ] Sheet schema, defaults, duplicate warnings, unsupported-page behavior, and
+- [x] Sheet schema, defaults, duplicate warnings, unsupported-page behavior, and
   manual fulfillment updates match `SPEC.md` and the implementation.
-- [ ] Setup and deployment commands include the fixed worksheet, allowlist,
+- [x] Setup and deployment commands include the fixed worksheet, allowlist,
   webhook secret, maximum instances `1`, and concurrency `1`.
 
 **Verification:**
 
-- [ ] Documentation commands are checked against actual filenames and CLI flags.
-- [ ] `rg -n "sales|settab|currenttab|listtabs" README.md` returns no stale feature documentation except explicit migration notes.
-- [ ] Secret placeholders contain no real credential values.
+- [x] Documentation commands are checked against actual filenames and CLI flags.
+- [x] `rg -n "sales|settab|currenttab|listtabs" README.md` returns no stale feature documentation except explicit migration notes.
+- [x] Secret placeholders contain no real credential values.
 
 **Dependencies:** Task 7
 
@@ -279,19 +280,20 @@ checklist without deploying.
 
 **Acceptance criteria:**
 
-- [ ] Every success criterion in `SPEC.md` maps to a passing automated test or a
+- [x] Every success criterion in `SPEC.md` maps to a passing automated test or a
   documented manual check.
 - [ ] Tests, lint, compilation, and container build pass from a clean environment.
-- [ ] Security review finds no credential leak, unsafe URL path, raw order log,
+- [x] Security review finds no credential leak, unsafe URL path, raw order log,
   or live external dependency in automated tests.
 
 **Verification:**
 
-- [ ] Tests pass: `.venv/bin/python -m pytest -q`
-- [ ] Lint passes: `.venv/bin/python -m ruff check .`
-- [ ] Compilation succeeds: `.venv/bin/python -m compileall -q bot.py models.py order_parser.py link_extractor.py order_service.py sheets.py`
-- [ ] Container builds: `docker build -t telegram-order-bot:local .`
-- [ ] Diff passes: `git diff --check`
+- [x] Tests pass: `.venv/bin/python -m pytest -q`
+- [x] Lint passes: `.venv/bin/python -m ruff check .`
+- [x] Compilation succeeds: `.venv/bin/python -m compileall -q bot.py models.py order_parser.py link_extractor.py order_service.py sheets.py`
+- [ ] Container builds: `docker build -t telegram-order-bot:local .` (Docker is
+  not installed in the current environment.)
+- [x] Diff passes: `git diff --check`
 
 **Dependencies:** Task 8
 
@@ -305,8 +307,8 @@ checklist without deploying.
 
 ## Checkpoint: Ready for implementation review
 
-- [ ] All specification success criteria are accounted for.
+- [x] All specification success criteria are accounted for.
 - [ ] Every task and checkpoint is complete.
-- [ ] No credentials or merchant page captures are tracked.
-- [ ] Manual smoke-test steps use a test spreadsheet.
-- [ ] Deployment remains a separate, explicitly authorized action.
+- [x] No credentials or merchant page captures are tracked.
+- [x] Manual smoke-test steps use a test spreadsheet.
+- [x] Deployment remains a separate, explicitly authorized action.

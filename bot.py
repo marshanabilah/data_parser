@@ -316,7 +316,11 @@ def build_telegram_application(config: BotConfig, order_service: OrderIntakeServ
     return application
 
 
-def build_web_application(telegram_app: Any, config: BotConfig) -> Starlette:
+def build_web_application(
+    telegram_app: Any,
+    config: BotConfig,
+    http_client: Optional[httpx.AsyncClient] = None,
+) -> Starlette:
     @asynccontextmanager
     async def lifespan(_app):
         async with telegram_app:
@@ -330,8 +334,12 @@ def build_web_application(telegram_app: Any, config: BotConfig) -> Starlette:
                 logger.info("Telegram webhook registered")
             else:
                 logger.warning("WEBHOOK_BASE_URL is unset; webhook was not registered")
-            yield
-            await telegram_app.stop()
+            try:
+                yield
+            finally:
+                await telegram_app.stop()
+                if http_client is not None:
+                    await http_client.aclose()
 
     async def health(_request: Request):
         return JSONResponse({"status": "ok"})
@@ -374,14 +382,9 @@ def main() -> None:
         repository,
     )
     telegram_app = build_telegram_application(config, service)
-    web_app = build_web_application(telegram_app, config)
+    web_app = build_web_application(telegram_app, config, http_client)
     logger.info("Bot HTTP server is starting on port %s", config.port)
-    try:
-        uvicorn.run(web_app, host="0.0.0.0", port=config.port)
-    finally:
-        import asyncio
-
-        asyncio.run(http_client.aclose())
+    uvicorn.run(web_app, host="0.0.0.0", port=config.port)
 
 
 if __name__ == "__main__":

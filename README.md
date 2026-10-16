@@ -1,199 +1,239 @@
-# 📊 Sales Telegram Bot
+# Telegram Order Link Bot
 
-Send sales messages through Telegram, review the parsed result, and save it to
-Google Sheets. The bot uses Claude to turn free-form text into structured data
-and runs as a webhook service on Google Cloud Run.
+This bot turns Telegram messages containing public product links into confirmed
+order rows in Google Sheets. It extracts product names and displayed prices,
+shows every proposed field for review, and writes only after an allowlisted user
+presses **Confirm**.
 
-## Architecture
+It runs as a webhook service on Google Cloud Run. With minimum instances set to
+zero, it can scale down while idle; Anthropic API usage and any Google Cloud
+usage outside the free allowance are billed separately.
+
+## What it does
+
+- Accepts multiple public HTTPS product links in one message
+- Creates one order row for every submitted link occurrence
+- Supports one shared DN Line or a separate DN Line per link
+- Uses manual `Items:` and `Nominal:` values when supplied
+- Extracts missing item names and displayed prices from ordinary public HTML
+- Preserves the displayed currency text without conversion
+- Warns about links already present in `Orders` without blocking them
+- Uses permanent sequential order numbers and WIB confirmation timestamps
+- Restricts all Telegram actions to an explicit user-ID allowlist
+- Verifies Telegram's webhook secret and rejects private-network destinations
+
+Pages requiring login, JavaScript rendering, CAPTCHA completion, or anti-bot
+bypass are unsupported. Supply `Items:` for such a page. `Nominal:` may be left
+blank.
+
+## Message format
+
+A DN Line is mandatory. Formatting can be flexible because the bot validates
+the interpreted mapping and displays a complete preview before saving.
+
+One DN shared by multiple links:
 
 ```text
-Telegram Bot API
-       │ HTTPS webhook
-       ▼
-Google Cloud Run (scales to zero)
-       ├── Claude API — text parsing
-       └── Google Sheets API — data storage
+DN Line: DN-001
+https://example.com/product/one
+https://example.com/product/two
 ```
 
-Cloud Run does not need to keep an instance running while the bot is idle. For
-light usage, this workload will typically remain within the Cloud Run free tier.
-Claude API usage is billed separately.
+Separate DNs paired with their links:
 
-## Features
+```text
+DN Line: DN-001
+https://example.com/product/one
 
-- Parses sales messages in Indonesian or English
-- Shows a preview with confirmation buttons before saving
-- Records timestamps in the WIB time zone
-- Switches spreadsheet tabs using `/settab`
-- Stores the active-tab setting in a hidden `_BotConfig` worksheet
-- Restricts the bot to an allowlist of Telegram user IDs
-- Protects the webhook using Telegram's secret-token header
+DN Line: DN-002
+https://example.com/product/two
+```
 
-## 1. Create a Telegram bot
+Manual fields for one link:
 
-1. Open Telegram and find **@BotFather**.
-2. Send `/newbot` and follow the instructions.
-3. Save the bot token that BotFather provides.
+```text
+DN Line: DN-002
+https://example.com/product/two
+Items: Limited Edition Album
+Nominal: ¥4,500
+```
 
-## 2. Prepare Google Sheets
+`Items:` overrides the extracted name. `Nominal:` overrides the extracted
+price and is treated as the complete value for that row. Corrections are made
+by cancelling the preview and resubmitting the message.
 
-1. Create a Google Sheet and copy the spreadsheet ID from its URL.
-2. In Google Cloud Console, enable the Google Sheets API and Google Drive API.
-3. Create a service account and download its JSON key.
-4. Share the spreadsheet with the service account's `client_email` and grant
-   Editor access.
+The only commands are:
 
-The bot creates the `Sales` tab and hidden `_BotConfig` worksheet when needed.
+| Command | Purpose |
+|---|---|
+| `/start` | Show the welcome message and examples |
+| `/help` | Show usage instructions |
 
-## 3. Configure the bot
+## Google Sheets layout
 
-The application uses these environment variables:
+The bot creates or validates one fixed worksheet named `Orders` with these exact
+columns:
 
-| Variable | Required | Description |
+| Date | Order No. | DN Line | Items | Link | Nominal | Arrived Date | Status | Box |
+|---|---:|---|---|---|---|---|---|---|
+| 2026-10-16 14:30 | 1 | DN-001 | Limited Edition Album | https://example.com/product/one | ¥4,500 |  | Ordered |  |
+
+- `Date` is assigned on confirmation in WIB using `YYYY-MM-DD HH:mm`.
+- `Order No.` is a stable, increasing ID; deleted IDs are not reused.
+- `Status` starts as `Ordered`.
+- `Arrived Date` and `Box` start blank.
+- Fulfilment changes to `Arrived Date`, `Status`, and `Box` are manual Sheet
+  edits in version 1.
+- The hidden `_BotConfig` worksheet stores sequence and idempotency state.
+- Existing unrelated worksheets are not modified.
+
+## Setup
+
+### 1. Create the Telegram bot
+
+Open **@BotFather** in Telegram, send `/newbot`, and keep the returned token.
+
+### 2. Prepare Google Sheets
+
+1. Create a spreadsheet and copy its ID from the URL.
+2. Enable the Google Sheets API and Google Drive API in Google Cloud.
+3. Create a service account and obtain its JSON credentials.
+4. Share the spreadsheet with the credentials' `client_email` as an Editor.
+
+The bot creates `Orders` and hidden `_BotConfig` when first used. If an existing
+`Orders` worksheet has different headers, the bot fails safely instead of
+rewriting it.
+
+### 3. Configure environment variables
+
+Copy `.env.example` to a local untracked `.env` and replace every placeholder.
+
+| Variable | Required | Purpose |
 |---|---:|---|
-| `TELEGRAM_TOKEN` | Yes | Token provided by BotFather |
-| `ANTHROPIC_API_KEY` | Yes | Anthropic API key |
-| `SPREADSHEET_ID` | Yes | Google Spreadsheet ID |
+| `TELEGRAM_TOKEN` | Yes | Token from BotFather |
+| `ANTHROPIC_API_KEY` | Yes | Flexible DN mapping and final name fallback |
+| `SPREADSHEET_ID` | Yes | Target Google Spreadsheet ID |
 | `GOOGLE_CREDENTIALS_JSON` | Yes | Complete service-account JSON document |
-| `TELEGRAM_WEBHOOK_SECRET` | Yes | Random secret used to verify Telegram webhook requests |
-| `ALLOWED_TELEGRAM_USER_IDS` | Yes | Comma-separated Telegram user IDs allowed to use the bot |
-| `WEBHOOK_BASE_URL` | After first deployment | Cloud Run service URL without a trailing slash |
-| `WEBHOOK_PATH` | No | Webhook path; defaults to `telegram` |
-| `PORT` | Automatic | Supplied by Cloud Run; defaults locally to `8080` |
+| `TELEGRAM_WEBHOOK_SECRET` | Yes | Verifies incoming Telegram webhook calls |
+| `ALLOWED_TELEGRAM_USER_IDS` | Yes | Comma-separated Telegram user IDs |
+| `WEBHOOK_BASE_URL` | After first deploy | Cloud Run URL without a trailing slash |
+| `WEBHOOK_PATH` | No | Defaults to `telegram` |
+| `PORT` | No | Supplied by Cloud Run; locally defaults to `8080` |
 
-Variable names and placeholder values are available in `.env.example`. Never
-commit real credentials or API keys.
-
-Create a webhook secret with:
+Generate a webhook secret locally:
 
 ```bash
 openssl rand -hex 32
 ```
 
-### Configure access control
-
-`ALLOWED_TELEGRAM_USER_IDS` is a fail-closed allowlist. The application refuses
-to start if the list is missing or empty. Multiple users can be separated with
-commas:
+The allowlist is fail-closed and uses numeric user IDs, not usernames or chat
+IDs:
 
 ```dotenv
 ALLOWED_TELEGRAM_USER_IDS=123456789,987654321
 ```
 
-To discover your user ID safely:
+If you do not know your user ID, temporarily use `0`, deploy, and send `/start`.
+The access-denied response displays the sender's ID. Replace `0` immediately and
+deploy again.
 
-1. Temporarily set the allowlist to a known numeric placeholder, such as `0`.
-2. Deploy the bot and send `/start` to it.
-3. The access-denied reply displays your own Telegram user ID.
-4. Replace the placeholder with that ID and deploy again.
+## Run locally
 
-The allowlist uses **user IDs**, not usernames or chat IDs. It protects normal
-messages, commands, and confirmation-button callbacks.
+Install dependencies in a virtual environment, export the variables, and start
+the service:
 
-## 4. Deploy to Google Cloud Run
+```bash
+python -m venv .venv
+.venv/bin/pip install -r requirements.txt
+.venv/bin/python bot.py
+```
 
-The first deployment does not require `WEBHOOK_BASE_URL`. The service starts its
-HTTP server but does not register a Telegram webhook until that URL is set.
+Telegram webhooks require a public HTTPS URL, so local Telegram testing also
+requires a tunnel and `WEBHOOK_BASE_URL` set to its public origin. The local
+health endpoint is `http://localhost:8080/`.
 
-1. Create a Google Cloud project and enable billing, the Cloud Run API, Cloud
-   Build API, and Artifact Registry API.
-2. Copy `.env.example` to `.env`, fill in every required variable, and leave
-   `WEBHOOK_BASE_URL` empty for the first deployment.
-3. From the repository directory, deploy the source:
+For development checks:
 
-   ```bash
-   gcloud run deploy sales-telegram-bot \
-     --source . \
-     --region asia-southeast2 \
-     --allow-unauthenticated \
-     --min 0 \
-     --max 1 \
-     --env-vars-file .env
-   ```
+```bash
+.venv/bin/pip install -r requirements-dev.txt
+.venv/bin/python -m pytest -q
+.venv/bin/python -m ruff check .
+```
 
-4. Copy the displayed service URL, such as
-   `https://sales-telegram-bot-xxxxx.asia-southeast2.run.app`, and save it as
-   `WEBHOOK_BASE_URL` in `.env`.
-5. Run the same deployment command again. When the new revision starts, the bot
-   automatically registers its webhook with Telegram.
+## Deploy to Google Cloud Run
 
-For production, store the Telegram token, Anthropic key, webhook secret, and
-service-account JSON in Google Secret Manager, then expose those secrets to the
-Cloud Run container as environment variables.
+Enable Cloud Run, Cloud Build, Artifact Registry, and billing in the selected
+Google Cloud project. The first deployment may leave `WEBHOOK_BASE_URL` blank:
 
-### Verify the deployment
+```bash
+gcloud run deploy telegram-order-bot \
+  --source . \
+  --region asia-southeast2 \
+  --allow-unauthenticated \
+  --min-instances 0 \
+  --max-instances 1 \
+  --concurrency 1 \
+  --env-vars-file .env
+```
 
-The root endpoint should return `{"status":"ok"}`:
+Copy the resulting service URL into `WEBHOOK_BASE_URL`, then run the same command
+again. The new revision registers the Telegram webhook during startup.
+
+Keep `--max-instances 1` and `--concurrency 1`: version 1 serializes sequential
+order-number allocation in one running instance. Deploy during a quiet window
+because old and new Cloud Run revisions can briefly overlap. Use Google Secret
+Manager for production tokens and credentials.
+
+Verify the health endpoint:
 
 ```bash
 curl https://YOUR-SERVICE-URL.run.app/
 ```
 
-Then send a sales message to the Telegram bot:
+It should return `{"status":"ok"}`.
+
+## Manual smoke test
+
+Use a separate test spreadsheet:
+
+1. Send one shared DN with two controlled public product links.
+2. Confirm the preview shows two rows and all nine fields.
+3. Confirm and verify sequential IDs, WIB dates, `Ordered`, and blank fulfilment
+   fields in `Orders`.
+4. Resubmit one link and verify the duplicate warning appears.
+5. Test a blocked page with a manual `Items:` value and confirm that a missing
+   nominal remains visibly blank.
+6. Send `/start` from a non-allowlisted account and verify no fetch or write
+   occurs.
+7. Cancel a preview and verify that no row was added.
+
+Deployment and live-data changes are intentionally separate from the automated
+test suite.
+
+## Project files
 
 ```text
-bakso ayam 10 porsi, es teh 20 gelas - Andi
-```
-
-## Usage
-
-| Command | Purpose |
-|---|---|
-| `/start` | Show the welcome message and command list |
-| `/help` | Show usage help |
-| `/settab <name>` | Select the active tab; it is created when data is first saved |
-| `/currenttab` | Show the active tab |
-| `/listtabs` | List all data tabs |
-
-Example messages:
-
-```text
-kaos polos 5 pcs sama celana jeans 3 - Andi, dari uniqlo
-vitamin c 10, sabun muka 5 - Siti
-beras 5kg, minyak goreng 3 botol - Budi
-```
-
-## Google Sheets columns
-
-| Date | Name | Store | Item Name | Quantity |
-|---|---|---|---|---:|
-| 2026-05-24 14:30 | Andi | Supermarket | Bakso Ayam | 10 |
-
-## Run locally
-
-A local webhook requires a public HTTPS URL, usually provided through a tunnel.
-Install the dependencies, export the variables from `.env.example`, and run:
-
-```bash
-python -m pip install -r requirements.txt
-python bot.py
-```
-
-Set `WEBHOOK_BASE_URL` to the public HTTPS tunnel URL. The health endpoint uses
-port `8080` by default.
-
-## Project structure
-
-```text
-.
-├── bot.py
-├── sheets.py
-├── requirements.txt
-├── Dockerfile
-├── .dockerignore
-├── .env.example
-└── README.md
+bot.py                 Telegram and webhook presentation
+models.py              Validated immutable data contracts
+order_parser.py        Link extraction and DN/override mapping
+link_extractor.py      Bounded public-page fetching and metadata extraction
+order_service.py       Order preparation and confirmation orchestration
+sheets.py              Fixed Orders worksheet persistence
+tests/                  Offline automated tests
+SPEC.md                 Approved product and engineering requirements
+tasks/                  Implementation plan and checklist
 ```
 
 ## Troubleshooting
 
-- **Container fails to start:** verify that all required variables except
-  `WEBHOOK_BASE_URL` are present and that the service-account JSON is valid.
-- **`ALLOWED_TELEGRAM_USER_IDS` error:** use numeric user IDs separated by commas;
-  do not use `@usernames`.
-- **Bot does not respond:** verify that `WEBHOOK_BASE_URL` exactly matches the
-  Cloud Run service URL and that the latest revision deployed successfully.
-- **Google Sheets fails:** verify that the spreadsheet was shared with the
-  service account using Editor access.
-- **Webhook returns 403:** if `TELEGRAM_WEBHOOK_SECRET` changed, deploy a new
-  revision so the bot can register the updated secret with Telegram.
+- **Container does not start:** check all required variables and credential JSON.
+- **Access denied:** add the numeric Telegram user ID to
+  `ALLOWED_TELEGRAM_USER_IDS`.
+- **Page cannot be read:** resubmit with an explicit `Items:` value; `Nominal:`
+  is optional.
+- **Worksheet schema error:** make the `Orders` header exactly match the table
+  above, or use a fresh test spreadsheet.
+- **Webhook returns 403:** confirm the deployed webhook secret matches the value
+  registered by the latest revision.
+- **Bot does not respond:** verify `WEBHOOK_BASE_URL`, the latest revision logs,
+  and the `/` health endpoint.
