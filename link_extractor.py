@@ -55,7 +55,7 @@ class PublicProductExtractor:
         self,
         client: httpx.AsyncClient,
         *,
-        resolver: Resolver = None,
+        resolver: Optional[Resolver] = None,
         item_fallback: Optional[ItemNameFallback] = None,
     ) -> None:
         self._client = client

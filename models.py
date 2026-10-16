@@ -14,6 +14,8 @@ class OrderValidationError(ValueError):
 
 
 def _required_text(value: str, field: str, maximum: int) -> str:
+    if not isinstance(value, str):
+        raise OrderValidationError(f"{field} must be text")
     cleaned = value.strip()
     if not cleaned:
         raise OrderValidationError(f"{field} is required")
@@ -27,6 +29,8 @@ def _optional_text(
 ) -> Optional[str]:
     if value is None:
         return None
+    if not isinstance(value, str):
+        raise OrderValidationError(f"{field} must be text")
     cleaned = value.strip()
     if not cleaned:
         raise OrderValidationError(f"{field} cannot be blank")
@@ -36,6 +40,8 @@ def _optional_text(
 
 
 def _public_https_url(value: str) -> str:
+    if not isinstance(value, str):
+        raise OrderValidationError("Link must be a public HTTPS URL")
     cleaned = value.strip()
     parsed = urlsplit(cleaned)
     if (
@@ -164,7 +170,11 @@ class SavedOrder:
     box: str = ""
 
     def __post_init__(self) -> None:
-        if isinstance(self.order_no, bool) or self.order_no < 1:
+        if (
+            isinstance(self.order_no, bool)
+            or not isinstance(self.order_no, int)
+            or self.order_no < 1
+        ):
             raise OrderValidationError("Order No. must be a positive integer")
         object.__setattr__(self, "date", _required_text(self.date, "Date", 32))
         object.__setattr__(

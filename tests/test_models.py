@@ -37,6 +37,18 @@ def test_submitted_link_rejects_invalid_or_non_https_url(link):
         SubmittedLink(dn_line="DN-001", link=link)
 
 
+def test_submitted_link_rejects_non_text_model_fields_cleanly():
+    with pytest.raises(OrderValidationError, match="DN Line must be text"):
+        SubmittedLink(dn_line=123, link="https://example.com/item/1")
+
+    with pytest.raises(OrderValidationError, match="Items override must be text"):
+        SubmittedLink(
+            dn_line="DN-001",
+            link="https://example.com/item/1",
+            items_override=["not", "text"],
+        )
+
+
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     [
@@ -100,11 +112,12 @@ def test_saved_order_serializes_to_the_exact_sheet_column_order():
     ]
 
 
-def test_saved_order_rejects_non_positive_order_number():
+@pytest.mark.parametrize("order_no", [0, "1", True])
+def test_saved_order_rejects_non_positive_or_non_integer_order_number(order_no):
     with pytest.raises(OrderValidationError, match="positive integer"):
         SavedOrder(
             date="2026-10-16 14:30",
-            order_no=0,
+            order_no=order_no,
             dn_line="DN-001",
             items="Limited Album",
             link="https://example.com/item/1",
