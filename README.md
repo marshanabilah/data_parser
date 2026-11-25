@@ -1,4 +1,28 @@
-# Telegram Order Link Bot
+# Jastip Order Project
+
+This project is moving toward a dashboard for jastip order management and
+customer self-service. The existing Telegram bot remains in the repository;
+its setup and behavior are described below.
+
+## Dashboard status
+
+The dashboard currently provides a single-admin login, logout, and a protected
+placeholder page. Sessions expire after eight hours. The public page is a
+placeholder; order management, customer item lookup, and the JPY-to-IDR price
+estimator are planned but not implemented. Payment verification is postponed.
+
+To try the dashboard locally, install the existing dependencies, then follow
+[DASHBOARD-SETUP.md](DASHBOARD-SETUP.md) to generate an admin password hash,
+configure the session secret, and start the app. The setup guide also explains
+password recovery and session storage.
+
+The dashboard is a local development foundation, not yet ready for public
+deployment. It needs HTTPS, persistent session storage, trusted proxy handling,
+and protection against repeated password attempts before it is exposed online.
+The [capability map](CAPABILITY-MAP.md) and
+[admin access specification](SPEC-admin-access.md) describe the planned work.
+
+## Existing Telegram bot
 
 This bot turns Telegram messages containing public product links into confirmed
 order rows in Google Sheets. It extracts product names and displayed prices,

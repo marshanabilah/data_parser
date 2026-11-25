@@ -217,3 +217,5 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 financial-api-466906-bede0e0c26de.json
+dashboard.sqlite3
+dashboard.sqlite3-*
