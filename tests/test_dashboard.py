@@ -78,16 +78,28 @@ def test_intake_parses_preview_and_requires_price(client, monkeypatch):
 
     browser, _, _ = client
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
-    monkeypatch.setattr(dashboard, "parse_order_message", lambda *args: (SubmittedLink(dn_line="DN1", link="https://example.com/a"),))
+    monkeypatch.setattr(dashboard, "parse_dashboard_order", lambda *args: ("UMS", (SubmittedLink(dn_line="DN1", link="https://example.com/a"),)))
 
     async def extract(_self, _link):
         return ExtractedProduct(items="Album", nominal=None)
 
     monkeypatch.setattr(dashboard.PublicProductExtractor, "extract", extract)
     browser.post("/login", data={"password": "correct horse"}, headers={"origin": "http://testserver"})
-    preview = browser.post("/admin/intake", data={"line_name": "Bela", "shop": "UMS", "message": "DN1 https://example.com/a"}, headers={"origin": "http://testserver"})
+    assert "name='shop'" not in browser.get("/admin/intake").text
+    preview = browser.post("/admin/intake", data={"line_name": "Bela", "message": "DN1 https://example.com/a"}, headers={"origin": "http://testserver"})
     assert preview.status_code == 200
     assert "Album" in preview.text
+    assert "value='UMS'" in preview.text
     assert "name='price' type='number' min='0' value='' required" in preview.text
     bad = {"token": "bad", "shop": "UMS", "line_name": "Bela", "order_date": "2026-11-26", "shipping": "", "dn": "DN1", "link": "https://example.com/a", "name": "Album", "price": "", "quantity": "1"}
     assert browser.post("/admin/confirm", data=bad, headers={"origin": "http://testserver"}).status_code == 400
+
+
+def test_new_shop_is_saved_with_confirmed_order(client):
+    browser, _, _ = client
+    browser.post("/login", data={"password": "correct horse"}, headers={"origin": "http://testserver"})
+    payload = {"token": "new-shop", "shop": "New Shop", "allows_multiple": "1", "line_name": "Bela", "order_date": "2026-11-26", "shipping": "", "dn": ["DN1", "DN1"], "link": ["https://example.com/a", "https://example.com/b"], "name": ["A", "B"], "price": ["100", "200"], "quantity": ["1", "2"]}
+    assert "Item IDs: 1" in browser.post("/admin/confirm", data=payload, headers={"origin": "http://testserver"}).text
+    shops = browser.get("/admin/shops").text
+    assert "New Shop" in shops
+    assert "<table class='shop-table'>" in shops

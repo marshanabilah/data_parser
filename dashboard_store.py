@@ -35,13 +35,18 @@ class DashboardStore:
         with self.connect() as db:
             db.execute("INSERT INTO shops VALUES (?, ?, ?) ON CONFLICT(name) DO UPDATE SET allows_multiple=excluded.allows_multiple, shipping_jpy=excluded.shipping_jpy", (name.strip(), allows_multiple, shipping_jpy))
 
-    def save(self, token: str, records: Sequence[OrderRecord]):
+    def save(self, token: str, records: Sequence[OrderRecord], new_shop=None):
         if not token or len(token) > 200 or not records:
             raise ValueError("A confirmation token and records are required")
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             if db.execute("SELECT 1 FROM order_batches WHERE token = ?", (token,)).fetchone():
                 return [row[0] for row in db.execute("SELECT id FROM dashboard_orders WHERE batch_token = ? ORDER BY id", (token,))]
+            if new_shop is not None:
+                name, allows_multiple = new_shop
+                if not name.strip() or len(name) > 100 or type(allows_multiple) is not bool:
+                    raise ValueError("Invalid shop settings")
+                db.execute("INSERT OR IGNORE INTO shops VALUES (?, ?, NULL)", (name.strip(), allows_multiple))
             db.execute("INSERT INTO order_batches VALUES (?)", (token,))
             ids = []
             for order in records:

@@ -22,9 +22,10 @@ from starlette.routing import Route
 
 from dashboard_store import DashboardStore
 from dashboard_orders import OrderRecord, ProductLine, STATUSES
+from dashboard_parser import parse_dashboard_order
 from dashboard_ui import page
 from link_extractor import PublicProductExtractor, ProductFetchError, UnsafeUrlError
-from order_parser import ClaudeOrderMessageInterpreter, OrderParseError, parse_order_message
+from order_parser import OrderParseError
 
 SESSION_SECONDS = 8 * 60 * 60
 
@@ -104,22 +105,21 @@ def create_app(db_path: str, credential: str, secret: str, secure: bool = True) 
         if not valid(request):
             return RedirectResponse("/login", status_code=303)
         if request.method == "GET":
-            options = "".join(f"<option>{html.escape(name)}</option>" for name, _, _ in store.shops())
-            return page("<span class='eyebrow'>New order</span><h1>Let's add an order.</h1><p class='intro'>Paste one customer's order from one shop. For multi-link shops, links in this submission share one record. Submit separate orders separately.</p><form method='post'><label>LINE display name <input name='line_name' required></label><label>Shop <select name='shop'>" + options + "</select></label><label>Order collection <textarea name='message' required></textarea></label><button>Parse and review</button></form>", title="Parse an order", active="intake")
+            return page("<span class='eyebrow'>New order</span><h1>Let's add an order.</h1><p class='intro'>Paste one customer's order from one shop. We'll identify the shop and let you review it before saving.</p><form method='post'><label>LINE display name <input name='line_name' required></label><label>Order collection <textarea name='message' required></textarea></label><button>Parse and review</button></form>", title="Parse an order", active="intake")
         if not csrf(request):
             return HTMLResponse("Invalid request", status_code=403)
         try:
             form = await get_form(request)
-            line_name, shop, message = (form.get(key, [""])[0].strip() for key in ("line_name", "shop", "message"))
-            settings = next((row for row in store.shops() if row[0] == shop), None)
+            line_name, message = (form.get(key, [""])[0].strip() for key in ("line_name", "message"))
             key = os.environ.get("ANTHROPIC_API_KEY", "")
-            if not line_name or not settings or not message or not key:
-                raise ValueError("LINE name, shop, order text, and ANTHROPIC_API_KEY are required.")
-            parsed = await asyncio.to_thread(parse_order_message, message, ClaudeOrderMessageInterpreter(anthropic.Anthropic(api_key=key)))
+            if not line_name or not message or not key:
+                raise ValueError("LINE name, order text, and ANTHROPIC_API_KEY are required.")
+            shop, parsed = await asyncio.to_thread(parse_dashboard_order, message, anthropic.Anthropic(api_key=key))
+            settings = next((row for row in store.shops() if shop and row[0].casefold() == shop.casefold()), None)
+            if settings:
+                shop = settings[0]
             if len(parsed) > 20:
                 raise ValueError("A submission may contain at most 20 links.")
-            if settings[1] and len({item.dn_line for item in parsed}) != 1:
-                raise ValueError("Multi-link orders must have one DN Line; submit different orders separately.")
             async with httpx.AsyncClient() as client:
                 extractor = PublicProductExtractor(client)
                 details = []
@@ -138,8 +138,8 @@ def create_app(db_path: str, credential: str, secret: str, secure: bool = True) 
                     details.append((item, name, yen))
             def esc(value):
                 return html.escape(str(value), quote=True)
-            fields = f"<input type='hidden' name='token' value='{secrets.token_urlsafe(32)}'><input type='hidden' name='shop' value='{esc(shop)}'><label>LINE name <input name='line_name' value='{esc(line_name)}' required></label><label>Order date <input type='date' name='order_date' value='{datetime.now(ZoneInfo('Asia/Jakarta')).date()}' required></label>"
-            fee = "" if settings[2] is None else str(settings[2])
+            fields = f"<input type='hidden' name='token' value='{secrets.token_urlsafe(32)}'><label>LINE name <input name='line_name' value='{esc(line_name)}' required></label><label>Shop (check the detected name) <input name='shop' value='{esc(shop or '')}' maxlength='100' required></label><label>For a new shop, links per order <select name='allows_multiple'><option value='0'>One link</option><option value='1'>Multiple links</option></select></label><p>Existing shops use their saved link rule. For a new shop, the selected rule will be saved with this order.</p><label>Order date <input type='date' name='order_date' value='{datetime.now(ZoneInfo('Asia/Jakarta')).date()}' required></label>"
+            fee = "" if not settings or settings[2] is None else str(settings[2])
             fields += f"<label>Shipping per record (JPY) <input name='shipping' type='number' min='0' value='{fee}'></label>"
             for item, name, yen in details:
                 warning = "<p>This link already exists in an order.</p>" if store.has_link(item.link) else ""
@@ -159,17 +159,23 @@ def create_app(db_path: str, credential: str, secret: str, secure: bool = True) 
             def one(key):
                 return form[key][0].strip()
             shop = one("shop")
-            setting = next(row for row in store.shops() if row[0] == shop)
+            setting = next((row for row in store.shops() if row[0].casefold() == shop.casefold()), None)
+            rule = one("allows_multiple") if not setting else str(setting[1])
+            if rule not in ("0", "1") or not shop or len(shop) > 100:
+                raise ValueError("Invalid shop")
+            if setting:
+                shop = setting[0]
+            multiple = rule == "1"
             names, links, dns, prices, quantities = (form[key] for key in ("name", "link", "dn", "price", "quantity"))
             if not names or len(names) > 20 or len({len(names), len(links), len(dns), len(prices), len(quantities)}) != 1:
                 raise ValueError("Invalid product fields")
             products = [ProductLine(name, link, int(price), int(qty)) for name, link, price, qty in zip(names, links, prices, quantities)]
-            if setting[1] and len(set(dns)) != 1:
+            if multiple and len(set(dns)) != 1:
                 raise ValueError("Orders must have one DN Line")
             shipping = int(one("shipping")) if one("shipping") else None
-            groups = [(dns[0], tuple(products))] if setting[1] else [(dn, (product,)) for dn, product in zip(dns, products)]
-            records = [OrderRecord(date.fromisoformat(one("order_date")), one("line_name"), dn, shop, bool(setting[1]), shipping, lines) for dn, lines in groups]
-            ids = store.save(one("token"), records)
+            groups = [(dns[0], tuple(products))] if multiple else [(dn, (product,)) for dn, product in zip(dns, products)]
+            records = [OrderRecord(date.fromisoformat(one("order_date")), one("line_name"), dn, shop, multiple, shipping, lines) for dn, lines in groups]
+            ids = store.save(one("token"), records, (shop, multiple) if not setting else None)
             return page("<span class='eyebrow'>All done</span><h1>Order saved.</h1><p>Item IDs: " + ", ".join(map(str, ids)) + "</p><a class='button' href='/admin/orders'>View orders</a>", title="Order saved", active="orders")
         except (ValueError, KeyError, StopIteration, OverflowError):
             return HTMLResponse("Invalid order. Return to the preview and check all fields.", status_code=400)
@@ -221,13 +227,13 @@ def create_app(db_path: str, credential: str, secret: str, secure: bool = True) 
                 return HTMLResponse("Invalid shop settings", status_code=400)
             return RedirectResponse("/admin/shops", status_code=303)
         rows = []
-        for name, multiple, fee in store.shops():
+        for index, (name, multiple, fee) in enumerate(store.shops()):
             safe_name = html.escape(name, quote=True)
             selected_single = " selected" if not multiple else ""
             selected_multi = " selected" if multiple else ""
             value = "" if fee is None else str(fee)
-            rows.append(f"<form method='post'><label>Shop <input name='name' value='{safe_name}' required></label> <label>Links <select name='allows_multiple'><option value='0'{selected_single}>One</option><option value='1'{selected_multi}>Multiple</option></select></label> <label>Suggested shipping (JPY) <input type='number' min='0' name='shipping_jpy' value='{value}'></label> <button>Save</button></form>")
-        return page("<span class='eyebrow'>Your preferences</span><h1>Shop settings</h1><p class='intro'>Choose how many links each shop allows and set an optional suggested shipping fee.</p>" + "".join(rows) + "<h2>Add a shop</h2><form method='post'><label>Shop <input name='name' required></label> <label>Links <select name='allows_multiple'><option value='0'>One</option><option value='1'>Multiple</option></select></label> <label>Suggested shipping (JPY) <input type='number' min='0' name='shipping_jpy'></label> <button>Add shop</button></form>", title="Shop settings", active="shops")
+            rows.append(f"<tr><td data-label='Shop'><strong>{safe_name}</strong><form id='shop-{index}' method='post'></form><input form='shop-{index}' type='hidden' name='name' value='{safe_name}'></td><td data-label='Links per order'><select form='shop-{index}' name='allows_multiple' aria-label='Links per order for {safe_name}'><option value='0'{selected_single}>One link</option><option value='1'{selected_multi}>Multiple links</option></select></td><td data-label='Suggested shipping (JPY)'><input form='shop-{index}' type='number' min='0' name='shipping_jpy' value='{value}' aria-label='Suggested shipping in JPY for {safe_name}' placeholder='Not set'></td><td><button form='shop-{index}' class='save-row'>Save<span class='sr-only'> {safe_name}</span></button></td></tr>")
+        return page("<span class='eyebrow'>Your preferences</span><h1>Shop settings</h1><p class='intro'>Choose how many links each shop allows and set an optional suggested shipping fee.</p><div class='shop-table-wrap'><table class='shop-table'><thead><tr><th>Shop</th><th>Links per order</th><th>Suggested shipping (JPY)</th><th><span class='sr-only'>Actions</span></th></tr></thead><tbody>" + "".join(rows) + "</tbody></table></div><h2 class='add-shop-heading'>Add a shop</h2><form method='post' class='add-shop-form'><label>Shop <input name='name' required></label> <label>Links <select name='allows_multiple'><option value='0'>One link</option><option value='1'>Multiple links</option></select></label> <label>Suggested shipping (JPY) <input type='number' min='0' name='shipping_jpy'></label> <button>Add shop</button></form>", title="Shop settings", active="shops")
 
     async def logout(request: Request):
         if not csrf(request):
