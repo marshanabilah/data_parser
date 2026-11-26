@@ -30,3 +30,26 @@ def test_invalid_batch_rolls_back(tmp_path):
         store.save("batch", [good, bad])
     assert store.search() == []
     assert len(store.save("batch", [good])) == 1
+
+
+def test_duplicate_lookup_includes_each_imported_link(tmp_path):
+    from csv_orders import parse_csv_orders
+    store = DashboardStore(str(tmp_path / "orders.sqlite"))
+    text = ('Date,Order No.,DN Line,Items,Link,Nominal,Arrived Date,Status,Box\n'
+            '26/2,1,A,Items,"https://example.com/a\nhttps://example.com/b",600,,Ordered,\n')
+    store.import_orders(parse_csv_orders(text))
+    assert store.has_link("https://example.com/a")
+    assert store.has_link("https://example.com/b")
+    assert not store.has_link("https://example.com/c")
+
+
+def test_legacy_invalid_price_does_not_block_status_update(tmp_path):
+    from csv_orders import parse_csv_orders
+    store = DashboardStore(str(tmp_path / "orders.sqlite"))
+    text = ('Date,Order No.,DN Line,Items,Link,Nominal,Arrived Date,Status,Box\n'
+            '26/2,1,A,Item,https://example.com/a,to be confirmed,,Ordered,\n')
+    store.import_orders(parse_csv_orders(text))
+    assert store.update_imported(1, "", "to be confirmed", status="Completed")
+    assert store.imported()[0][1]["_current_status"] == "Completed"
+    with pytest.raises(ValueError):
+        store.update_imported(1, "", "bad new price", status="Purchased")

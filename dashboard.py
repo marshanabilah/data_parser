@@ -27,6 +27,7 @@ from dashboard_ui import page as render_page
 from link_extractor import PublicProductExtractor, ProductFetchError, UnsafeUrlError
 from order_parser import OrderParseError
 from pricing import calculate
+from product_urls import extract_product_urls, single_https_host
 
 SESSION_SECONDS = 8 * 60 * 60
 
@@ -43,6 +44,11 @@ def product_link(value: str) -> str:
     except ValueError:
         return html.escape(value) if value else "—"
     return f"<a class='product-link' href='{html.escape(value, quote=True)}' target='_blank' rel='noopener noreferrer' aria-label='Open product at {html.escape(host, quote=True)} (opens in a new tab)'>{html.escape(host)} ↗</a>"
+
+
+def product_links(value: str) -> str:
+    links = extract_product_urls(value)
+    return "".join(f"<div>{product_link(link)}</div>" for link in links) if links else product_link(value)
 
 
 def password_hash(password: str, salt: str) -> str:
@@ -140,7 +146,7 @@ def create_app(db_path: str, credential: str, secret: str, secure: bool = True) 
                 shop = settings[0]
             if len(parsed) > 20:
                 raise ValueError("A submission may contain at most 20 links.")
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(trust_env=False) as client:
                 extractor = PublicProductExtractor(client)
                 details = []
                 for item in parsed:
@@ -158,13 +164,14 @@ def create_app(db_path: str, credential: str, secret: str, secure: bool = True) 
                     details.append((item, name, yen))
             def esc(value):
                 return html.escape(str(value), quote=True)
-            fields = f"<input type='hidden' name='token' value='{secrets.token_urlsafe(32)}'><label>LINE name <input name='line_name' value='{esc(line_name)}' required></label><label>Shop (check the detected name) <input name='shop' value='{esc(shop or '')}' maxlength='100' required></label><label>For a new shop, links per order <select name='allows_multiple'><option value='0'>One link</option><option value='1'>Multiple links</option></select></label><p>Existing shops use their saved link rule. For a new shop, the selected rule will be saved with this order.</p><label>Order date <input type='date' name='order_date' value='{datetime.now(ZoneInfo('Asia/Jakarta')).date()}' required></label>"
+            fields = f"<input type='hidden' name='token' value='{secrets.token_urlsafe(32)}'><input type='hidden' name='suggested_shop' value='{esc(shop or '')}'><label>LINE name <input name='line_name' value='{esc(line_name)}' required></label><label>Shop (check the detected name) <input id='preview-shop' name='shop' value='{esc(shop or '')}' maxlength='100' required></label><label>For a new shop, links per order <select name='allows_multiple'><option value='0'>One link</option><option value='1'>Multiple links</option></select></label><p>Existing shops use their saved link rule. For a new shop, the selected rule will be saved with this order.</p><label>Order date <input type='date' name='order_date' value='{datetime.now(ZoneInfo('Asia/Jakarta')).date()}' required></label>"
             fee = "" if not settings or settings[2] is None else str(settings[2])
-            fields += f"<label>Shipping per record (JPY) <input name='shipping' type='number' min='0' value='{fee}'></label>"
+            fields += f"<input type='hidden' name='suggested_fee' value='{fee}'><label>Shipping per record (JPY) <input id='preview-shipping' name='shipping' type='number' min='0' value='{fee}'></label><label class='remember-domain'><input type='checkbox' name='shipping_verified' value='yes'> If I changed the shop, I have checked the shipping fee.</label>"
             for item, name, yen in details:
                 warning = "<p>This link already exists in an order.</p>" if store.has_link(item.link) else ""
                 fields += f"<fieldset><legend>Product</legend>{warning}<label>Link <input name='link' value='{esc(item.link)}' readonly></label><label>Name <input name='name' value='{esc(name)}' required></label><label>Price (JPY) <input name='price' type='number' min='0' value='{esc(yen)}' required></label><label>Quantity <input name='quantity' type='number' min='1' value='1' required></label></fieldset>"
-            return page("<span class='eyebrow'>Almost there</span><h1>Review your order.</h1><p class='intro'>Check the details before saving.</p><form method='post' action='/admin/confirm'>" + fields + "<button>Confirm and save</button></form><a href='/admin/intake'>Cancel</a>", title="Review order", active="intake")
+            script = "<script>const shop=document.getElementById('preview-shop'); const fee=document.getElementById('preview-shipping'); const initial=shop.value.trim().toLowerCase(); shop.addEventListener('input',()=>{if(shop.value.trim().toLowerCase()!==initial){fee.value='';}});</script>"
+            return page("<span class='eyebrow'>Almost there</span><h1>Review your order.</h1><p class='intro'>Check the details before saving.</p><form method='post' action='/admin/confirm'>" + fields + "<button>Confirm and save</button></form><a href='/admin/intake'>Cancel</a>" + script, title="Review order", active="intake")
         except (ValueError, OrderParseError) as exc:
             return page("<h1>Could not parse this order.</h1><p>" + html.escape(str(exc)) + "</p><a href='/admin/intake'>Try again</a>", title="Parsing problem", active="intake", status_code=400)
 
@@ -194,12 +201,17 @@ def create_app(db_path: str, credential: str, secret: str, secure: bool = True) 
             if multiple and len(set(dns)) != 1:
                 raise ValueError("Orders must have one DN Line")
             shipping = int(one("shipping")) if one("shipping") else None
+            suggested_shop = form.get("suggested_shop", [""])[0].strip()
+            suggested_fee = form.get("suggested_fee", [""])[0].strip()
+            if suggested_shop and suggested_fee and shop.casefold() != suggested_shop.casefold() and one("shipping") == suggested_fee and form.get("shipping_verified", [""])[0] != "yes":
+                raise ValueError("Check the shipping fee for the changed shop before saving.")
             groups = [(dns[0], tuple(products))] if multiple else [(dn, (product,)) for dn, product in zip(dns, products)]
             records = [OrderRecord(date.fromisoformat(one("order_date")), one("line_name"), dn, shop, multiple, shipping, lines) for dn, lines in groups]
             ids = store.save(one("token"), records, (shop, multiple) if not setting else None)
             return page("<span class='eyebrow'>All done</span><h1>Order saved.</h1><p>Item IDs: " + ", ".join(map(str, ids)) + "</p><a class='button' href='/admin/orders'>View orders</a>", title="Order saved", active="orders")
-        except (ValueError, KeyError, StopIteration, OverflowError):
-            return HTMLResponse("Invalid order. Return to the preview and check all fields.", status_code=400)
+        except (ValueError, KeyError, StopIteration, OverflowError) as exc:
+            message = str(exc) if str(exc) == "Check the shipping fee for the changed shop before saving." else "Invalid order. Return to the preview and check all fields."
+            return page(f"<h1>Could not save this order</h1><p role='alert'>{html.escape(message)}</p><button type='button' onclick='history.back()'>Back to review</button>", title="Order problem", active="intake", status_code=400)
 
     async def calculator(request: Request):
         if not valid(request):
@@ -289,7 +301,7 @@ def create_app(db_path: str, credential: str, secret: str, secure: bool = True) 
             try:
                 form = await get_form(request)
                 if form.get("kind", [""])[0] == "imported":
-                    updated = store.update_imported(int(form["id"][0]), form["shop"][0], form["nominal"][0], new_rule=form.get("new_rule", [""])[0], remember_domain=form.get("remember_domain", [""])[0] == "yes")
+                    updated = store.update_imported(int(form["id"][0]), form["shop"][0], form["nominal"][0], new_rule=form.get("new_rule", [""])[0], remember_domain=form.get("remember_domain", [""])[0] == "yes", status=form.get("status", [""])[0])
                 else:
                     updated = store.set_status(int(form["id"][0]), form["status"][0])
                 if not updated:
@@ -316,28 +328,27 @@ def create_app(db_path: str, credential: str, secret: str, secure: bool = True) 
             for order_id, order_date, name, dn, shop, shipping, status in store.search(query):
                 products = store.products(order_id)
                 lines = "".join(f"<li>{esc(title)} — ¥{price} × {quantity} {product_link(link)}</li>" for title, link, price, quantity in products)
-                product_links = "".join(f"<div>{product_link(link)}</div>" for _, link, _, _ in products) or "—"
+                link_markup = "".join(f"<div>{product_link(link)}</div>" for _, link, _, _ in products) or "—"
                 summary = products[0][0] + (f" + {len(products) - 1} more" if len(products) > 1 else "") if products else "No product"
                 options = "".join(f"<option{' selected' if state == status else ''}>{esc(state)}</option>" for state in STATUSES)
                 details = f"<button type='button' class='open-order' data-dialog='order-{order_id}'>Details &amp; update</button><dialog id='order-{order_id}' aria-labelledby='title-{order_id}'><div class='dialog-heading'><h2 id='title-{order_id}'>Item #{order_id}</h2><button type='button' class='close-order' aria-label='Close'>×</button></div><div class='order-details'><p>Shop: {esc(shop)} · Shipping: {esc(shipping if shipping is not None else 'not set')} JPY</p><ul>{lines}</ul><form method='post'>{view_fields}<input type='hidden' name='id' value='{order_id}'><label>Status <select name='status'>{options}</select></label><button>Update status</button></form></div></dialog>"
-                result.append((order_id, f"<tr><td>#{order_id}</td><td>{esc(order_date)}</td><td>{esc(name)}</td><td>{esc(summary)}</td><td class='link-cell'>{product_links}</td><td>{esc(status)}</td><td>{details}</td></tr>"))
+                result.append((order_id, f"<tr><td>#{order_id}</td><td>{esc(order_date)}</td><td>{esc(name)}</td><td>{esc(summary)}</td><td class='link-cell'>{link_markup}</td><td>{esc(status)}</td><td>{details}</td></tr>"))
         for order_id, row, shop, nominal in store.imported(query):
             needs_review = shop.strip().casefold() not in known_shops
             if review_only and not needs_review:
                 continue
-            details = "".join(f"<div><dt>{esc(label)}</dt><dd>{product_link(row[key]) if key == 'Link' else esc(row[key]) or '—'}</dd></div>" for key, label in (("Order No.", "Original order number"), ("Date", "Date"), ("DN Line", "LINE name"), ("Items", "Item"), ("Link", "Product link"), ("Nominal", "Original price"), ("Arrived Date", "Arrived date"), ("Status", "Original status"), ("Box", "Box")))
+            details = "".join(f"<div><dt>{esc(label)}</dt><dd>{product_links(row[key]) if key == 'Link' else esc(row[key]) or '—'}</dd></div>" for key, label in (("Order No.", "Original order number"), ("Date", "Date"), ("DN Line", "LINE name"), ("Items", "Item"), ("Link", "Product link"), ("Nominal", "Original price"), ("Arrived Date", "Arrived date"), ("Status", "Original status"), ("Box", "Box")))
             details += "".join(f"<div><dt>{esc(column['header'] or 'Extra column')}</dt><dd>{esc(column['value'])}</dd></div>" for column in row.get("Extra columns", []) if column["value"])
             price_note = "<p>Price missing or invalid.</p>" if not valid_jpy(nominal) else ""
-            try:
-                parsed_link = urlsplit(row['Link'].strip())
-                host = parsed_link.hostname if parsed_link.scheme.lower() == 'https' and not parsed_link.username and not parsed_link.password else None
-            except ValueError:
-                host = None
+            host = single_https_host(row['Link'])
             remember = f"<label class='remember-domain'><input type='checkbox' name='remember_domain' value='yes' checked> Remember {esc(host)} for this shop and match other unassigned orders</label>" if host else ""
-            form = f"<button type='button' class='open-order' data-dialog='order-{order_id}'>Details &amp; review</button><dialog id='order-{order_id}' aria-labelledby='title-{order_id}'><div class='dialog-heading'><h2 id='title-{order_id}'>Item #{order_id}</h2><button type='button' class='close-order' aria-label='Close'>×</button></div><div class='order-details'><details class='original-values'><summary>View original sheet details</summary><dl class='sheet-values'>{details}</dl></details>{price_note}<form method='post'>{view_fields}<input type='hidden' name='kind' value='imported'><input type='hidden' name='id' value='{order_id}'><label>Shop <input name='shop' value='{esc(shop)}' list='known-shops'></label><label>If this shop is new, links per order <select name='new_rule'><option value=''>Choose for a new shop</option><option value='0'>One link</option><option value='1'>Multiple links</option></select></label>{remember}<label>Price (JPY) <input name='nominal' value='{esc(nominal)}'></label><button>Save review</button></form></div></dialog>"
+            current_status = row.get('_current_status')
+            original_option = f"<option value='' selected>Keep original: {esc(row['Status']) or 'not set'}</option>" if not current_status else ""
+            status_options = original_option + "".join(f"<option{' selected' if state == current_status else ''}>{esc(state)}</option>" for state in STATUSES)
+            form = f"<button type='button' class='open-order' data-dialog='order-{order_id}'>Details &amp; review</button><dialog id='order-{order_id}' aria-labelledby='title-{order_id}'><div class='dialog-heading'><h2 id='title-{order_id}'>Item #{order_id}</h2><button type='button' class='close-order' aria-label='Close'>×</button></div><div class='order-details'><details class='original-values'><summary>View original sheet details</summary><dl class='sheet-values'>{details}</dl></details>{price_note}<form method='post'>{view_fields}<input type='hidden' name='kind' value='imported'><input type='hidden' name='id' value='{order_id}'><label>Shop <input name='shop' value='{esc(shop)}' list='known-shops'></label><label>If this shop is new, links per order <select name='new_rule'><option value=''>Choose for a new shop</option><option value='0'>One link</option><option value='1'>Multiple links</option></select></label>{remember}<label>Price (JPY) <input name='nominal' value='{esc(nominal)}'></label><label>Status <select name='status'>{status_options}</select></label><button>Save review</button></form></div></dialog>"
             review_text = "Needs review" if needs_review else "Shop known"
             price_flag = "<br><small>Price missing or invalid</small>" if not valid_jpy(nominal) else ""
-            result.append((order_id, f"<tr><td>#{order_id}</td><td>{esc(row['Date']) or '—'}</td><td>{esc(row['DN Line'])}</td><td>{esc(row['Items']) or '—'}</td><td class='link-cell'>{product_link(row['Link'])}</td><td><span class='review-label'>{review_text}</span><br>{esc(row['Status'])}{price_flag}</td><td>{form}</td></tr>"))
+            result.append((order_id, f"<tr><td>#{order_id}</td><td>{esc(row['Date']) or '—'}</td><td>{esc(row['DN Line'])}</td><td>{esc(row['Items']) or '—'}</td><td class='link-cell'>{product_links(row['Link'])}</td><td><span class='review-label'>{review_text}</span><br>{esc(current_status or row['Status'])}{price_flag}</td><td>{form}</td></tr>"))
         result.sort(key=lambda record: record[0], reverse=True)
         empty = "<div class='empty-state'>No matching orders yet. Try another search or add an order.</div>" if not result else ""
         search_args = "?" + urlencode({"q": query}) if query else ""

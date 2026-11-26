@@ -157,14 +157,41 @@ def test_revalidates_each_redirect_and_does_not_follow_unsafe_target():
         }[hostname]
 
     def handler(request):
-        calls.append(str(request.url))
-        if request.url.host == "shop.example":
+        calls.append(request.headers["host"] + request.url.path)
+        if request.headers["host"] == "shop.example":
             return httpx.Response(302, headers={"location": "https://cdn.example/item"})
         return httpx.Response(302, headers={"location": "https://internal.example/secret"})
 
     with pytest.raises(UnsafeUrlError):
         run_extract(handler, resolver=resolver)
-    assert calls == ["https://shop.example/product", "https://cdn.example/item"]
+    assert calls == ["shop.example/product", "cdn.example/item"]
+
+
+def test_connection_is_pinned_to_validated_address_with_original_tls_name():
+    seen = []
+
+    def handler(request):
+        seen.append((request.url.host, request.headers["host"], request.extensions.get("sni_hostname"), request.headers["connection"]))
+        return html_response("<h1>Product</h1>")
+
+    run_extract(handler, url="https://shop.example:8443/product")
+    assert seen == [("93.184.216.34", "shop.example:8443", "shop.example", "close")]
+
+
+def test_connection_can_try_another_validated_address():
+    seen = []
+
+    async def resolver(_hostname):
+        return ("93.184.216.34", "8.8.8.8")
+
+    def handler(request):
+        seen.append(request.url.host)
+        if len(seen) == 1:
+            raise httpx.ConnectError("unreachable", request=request)
+        return html_response("<h1>Product</h1>")
+
+    assert run_extract(handler, resolver=resolver).items == "Product"
+    assert seen == ["93.184.216.34", "8.8.8.8"]
 
 
 def test_redirect_limit_is_enforced():

@@ -39,3 +39,12 @@ def test_csv_retains_duplicate_ids_and_extra_columns(tmp_path):
 def test_csv_rejects_wrong_header():
     with pytest.raises(ValueError):
         parse_csv_orders('wrong,headers\na,b\n')
+
+
+def test_changed_export_with_overlapping_original_number_is_rejected(tmp_path):
+    store = DashboardStore(str(tmp_path / 'db.sqlite'))
+    store.import_orders(parse_csv_orders(CSV))
+    changed = CSV.replace('Ordered', 'Arrived WH JP') + '2026-10-17,24,Ani,Card,https://example.com/b,500,,,\n'
+    with pytest.raises(ValueError, match='overlaps'):
+        store.import_orders(parse_csv_orders(changed))
+    assert len(store.imported()) == 1

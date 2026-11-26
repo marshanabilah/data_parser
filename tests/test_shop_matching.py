@@ -26,3 +26,11 @@ def test_duplicate_domain_rejected_without_changing_shop(tmp_path):
     with pytest.raises(ValueError, match="already assigned"):
         store.set_shop("Other", True, 50, domains=["mercari.com"])
     assert "Other" not in [name for name, _, _ in store.shops()]
+
+
+def test_multiple_shops_are_not_assigned_from_first_link(tmp_path):
+    store = DashboardStore(str(tmp_path / "test.sqlite"))
+    text = ('Date,Order No.,DN Line,Items,Link,Nominal,Arrived Date,Status,Box\n'
+            '26/2,1,A,Items,"https://jp.mercari.com/a\nhttps://example.com/b",600,,Ordered,\n')
+    store.import_orders(parse_csv_orders(text))
+    assert store.imported()[0][2] == ""

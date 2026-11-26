@@ -5,9 +5,9 @@ import json
 import re
 import hashlib
 from typing import Optional, Sequence
-from urllib.parse import urlsplit
 
 from dashboard_orders import OrderRecord, STATUSES
+from product_urls import extract_product_urls, single_https_host
 
 DEFAULT_SHOPS = {"Mercari": False, "Rakuten": False, "Fril": False, "UMS": True, "Lashinbang": True, "Weverse": True}
 DEFAULT_DOMAINS = {"mercari.com": "Mercari", "rakuten.co.jp": "Rakuten", "fril.jp": "Fril", "lashinbang.com": "Lashinbang"}
@@ -31,6 +31,9 @@ class DashboardStore:
                 CREATE TABLE IF NOT EXISTS csv_import_batches (fingerprint TEXT PRIMARY KEY);
                 CREATE TABLE IF NOT EXISTS shop_domains (domain TEXT PRIMARY KEY COLLATE NOCASE, shop TEXT NOT NULL REFERENCES shops(name));
             """)
+            columns = {row[1] for row in db.execute("PRAGMA table_info(imported_orders)")}
+            if "current_status" not in columns:
+                db.execute("ALTER TABLE imported_orders ADD COLUMN current_status TEXT")
             db.executemany("INSERT OR IGNORE INTO shops VALUES (?, ?, NULL)", DEFAULT_SHOPS.items())
             if not db.execute("SELECT 1 FROM dashboard_settings WHERE key = 'shop_domains_initialized'").fetchone():
                 db.executemany("INSERT OR IGNORE INTO shop_domains VALUES (?, ?)", DEFAULT_DOMAINS.items())
@@ -52,12 +55,8 @@ class DashboardStore:
 
     @staticmethod
     def _matching_shop(link, domains):
-        try:
-            url = urlsplit(link.strip())
-            if url.scheme.lower() != "https" or url.username is not None or url.password is not None:
-                return None
-            host = (url.hostname or "").lower().rstrip(".")
-        except ValueError:
+        host = single_https_host(link)
+        if not host:
             return None
         matches = [(domain, shop) for domain, shop in domains if host == domain or host.endswith("." + domain)]
         return max(matches, key=lambda item: len(item[0]))[1] if matches else None
@@ -137,6 +136,10 @@ class DashboardStore:
             fingerprint = hashlib.sha256(json.dumps(records, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
             if db.execute("SELECT 1 FROM csv_import_batches WHERE fingerprint = ?", (fingerprint,)).fetchone():
                 raise ValueError("This CSV has already been imported; no rows were added.")
+            imported_ids = {int(json.loads(row[0])["Order No."]) for row in db.execute("SELECT original_json FROM imported_orders")}
+            overlapping = {int(row["Order No."]) for row in records} & imported_ids
+            if overlapping:
+                raise ValueError(f"This CSV overlaps with {len(overlapping)} previously imported original order numbers. No rows were added; review the overlap before importing.")
             existing = {row[0] for row in db.execute("SELECT id FROM dashboard_orders UNION SELECT id FROM imported_orders")}
             originals = {int(row["Order No."]) for row in records}
             maximum = max(existing | originals)
@@ -163,41 +166,42 @@ class DashboardStore:
 
     def imported(self, query=""):
         with self.connect() as db:
-            rows = db.execute("SELECT id, original_json, shop, nominal FROM imported_orders ORDER BY id DESC").fetchall()
+            rows = db.execute("SELECT id, original_json, shop, nominal, current_status FROM imported_orders ORDER BY id DESC").fetchall()
         result = []
-        for order_id, raw, shop, nominal in rows:
+        for order_id, raw, shop, nominal, current_status in rows:
             row = json.loads(raw)
+            row["_current_status"] = current_status
             if not query or query == str(order_id) or query.casefold() in row["DN Line"].casefold():
                 result.append((order_id, row, shop, nominal))
         return result
 
-    def update_imported(self, order_id, shop, nominal, new_rule=None, remember_domain=False):
+    def update_imported(self, order_id, shop, nominal, new_rule=None, remember_domain=False, status=None):
         if len(shop) > 100 or len(nominal) > 100:
             raise ValueError("Shop or price is too long")
-        if nominal.strip() and not valid_jpy(nominal):
-            raise ValueError("Price must be a whole-yen amount or blank")
+        if status and status not in STATUSES:
+            raise ValueError("Invalid status")
         with self.connect() as db:
-            record = db.execute("SELECT original_json FROM imported_orders WHERE id = ?", (order_id,)).fetchone()
+            record = db.execute("SELECT original_json, nominal, shop FROM imported_orders WHERE id = ?", (order_id,)).fetchone()
             if not record:
                 return False
+            if nominal.strip() != record[1].strip() and nominal.strip() and not valid_jpy(nominal):
+                raise ValueError("Price must be a whole-yen amount or blank")
             name = shop.strip()
             known = db.execute("SELECT name FROM shops WHERE name = ?", (name,)).fetchone() if name else None
             if name and not known:
                 if new_rule not in ("0", "1"):
-                    raise ValueError("This is a new shop. Choose whether it allows one link or multiple links.")
-                db.execute("INSERT INTO shops (name, allows_multiple, shipping_jpy) VALUES (?, ?, NULL)", (name, int(new_rule)))
-                known = (name,)
+                    if name.casefold() != record[2].strip().casefold():
+                        raise ValueError("This is a new shop. Choose whether it allows one link or multiple links.")
+                else:
+                    db.execute("INSERT INTO shops (name, allows_multiple, shipping_jpy) VALUES (?, ?, NULL)", (name, int(new_rule)))
+                    known = (name,)
             if known:
                 name = known[0]
-            if remember_domain and name:
+            if remember_domain and known:
                 link = json.loads(record[0]).get("Link", "")
-                try:
-                    url = urlsplit(link.strip())
-                    domain = (url.hostname or "").lower().rstrip(".")
-                    if url.scheme.lower() != "https" or url.username is not None or url.password is not None:
-                        raise ValueError
-                except ValueError as exc:
-                    raise ValueError("This order has no valid HTTPS website to remember.") from exc
+                domain = single_https_host(link)
+                if not domain:
+                    raise ValueError("This order does not have a single HTTPS website to remember.")
                 domains = db.execute("SELECT domain, shop FROM shop_domains").fetchall()
                 owner = self._matching_shop(link, domains)
                 if owner and owner.casefold() != name.casefold():
@@ -205,8 +209,8 @@ class DashboardStore:
                 if not owner:
                     existing = [domain for domain, shop_name in domains if shop_name.casefold() == name.casefold()]
                     self._set_shop_domains(db, name, [*existing, domain])
-            db.execute("UPDATE imported_orders SET shop = ?, nominal = ? WHERE id = ?", (name, nominal.strip(), order_id))
-            if remember_domain:
+            db.execute("UPDATE imported_orders SET shop = ?, nominal = ?, current_status = COALESCE(?, current_status) WHERE id = ?", (name, nominal.strip(), status or None, order_id))
+            if remember_domain and known:
                 self._fill_missing_shops(db)
             return True
 
@@ -220,7 +224,10 @@ class DashboardStore:
 
     def has_link(self, link: str) -> bool:
         with self.connect() as db:
-            return db.execute("SELECT 1 FROM dashboard_products WHERE link = ? LIMIT 1", (link,)).fetchone() is not None
+            if db.execute("SELECT 1 FROM dashboard_products WHERE link = ? LIMIT 1", (link,)).fetchone():
+                return True
+            rows = db.execute("SELECT original_json FROM imported_orders").fetchall()
+        return any(link in extract_product_urls(json.loads(row[0]).get("Link", "")) for row in rows)
 
     def set_status(self, order_id: int, status: str):
         if status not in STATUSES:

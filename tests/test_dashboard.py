@@ -105,6 +105,18 @@ def test_new_shop_is_saved_with_confirmed_order(client):
     assert "<table class='shop-table'>" in shops
 
 
+def test_changed_shop_requires_shipping_fee_review(client):
+    browser, _, _ = client
+    headers = {"origin": "http://testserver"}
+    browser.post("/login", data={"password": "correct horse"}, headers=headers)
+    payload = {"token": "shipping", "shop": "Rakuten", "suggested_shop": "Mercari", "suggested_fee": "210", "shipping": "210", "line_name": "Bela", "order_date": "2026-11-26", "link": "https://example.com/a", "name": "A", "price": "100", "quantity": "1"}
+    result = browser.post("/admin/confirm", data=payload, headers=headers)
+    assert result.status_code == 400
+    assert "Check the shipping fee" in result.text
+    payload["shipping_verified"] = "yes"
+    assert "Item IDs: 1" in browser.post("/admin/confirm", data=payload, headers=headers).text
+
+
 def test_csv_preview_import_and_duplicate_protection(client):
     browser, _, _ = client
     csv_text = "Date,Order No.,DN Line,Items,Link,Nominal,Arrived Date,Status,Box\n2026-10-16,57,Bela,Album,https://example.com/a,,,Ordered,Box 1\n"
@@ -160,6 +172,23 @@ def test_known_shop_without_price_is_not_in_shop_review(client):
     assert "value='Mercari'" in orders
 
 
+def test_imported_order_status_can_change_without_losing_original(client):
+    browser, _, _ = client
+    headers = {"origin": "http://testserver"}
+    csv_text = ("Date,Order No.,DN Line,Items,Link,Nominal,Arrived Date,Status,Box\n"
+                "26/2,77,Bela,Album,https://jp.mercari.com/item/a,600,,Arrived WH JP,\n")
+    browser.post("/login", data={"password": "correct horse"}, headers=headers)
+    browser.post("/admin/import", data={"csv": csv_text, "confirm": "yes"}, headers=headers)
+    payload = {"kind": "imported", "id": "77", "shop": "Mercari", "nominal": "600", "status": "Shipping to Indonesia"}
+    assert browser.post("/admin/orders", data=payload, headers=headers).status_code == 200
+    orders = browser.get("/admin/orders").text
+    assert "selected>Shipping to Indonesia" in orders
+    assert "Arrived WH JP" in orders
+    payload["status"] = "Purchased"
+    browser.post("/admin/orders", data=payload, headers=headers)
+    assert "selected>Purchased" in browser.get("/admin/orders").text
+
+
 def test_review_can_create_shop_and_match_other_orders(client):
     browser, _, _ = client
     headers = {"origin": "http://testserver"}
@@ -195,6 +224,18 @@ def test_unsafe_imported_link_is_not_clickable(client):
     orders = browser.get("/admin/orders").text
     assert "javascript:alert(1)" in orders
     assert "href='javascript:alert(1)'" not in orders
+
+
+def test_imported_multiple_links_are_separately_clickable(client):
+    browser, _, _ = client
+    headers = {"origin": "http://testserver"}
+    csv_text = ('Date,Order No.,DN Line,Items,Link,Nominal,Arrived Date,Status,Box\n'
+                '26/2,91,Example,Items,"https://example.com/a\nhttps://example.com/b",600,,Ordered,\n')
+    browser.post("/login", data={"password": "correct horse"}, headers=headers)
+    browser.post("/admin/import", data={"csv": csv_text, "confirm": "yes"}, headers=headers)
+    orders = browser.get("/admin/orders").text
+    assert "href='https://example.com/a'" in orders
+    assert "href='https://example.com/b'" in orders
 
 
 def test_admin_calculator_rate_persists_and_requires_login(client):

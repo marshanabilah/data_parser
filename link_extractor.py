@@ -138,23 +138,35 @@ async def _fetch_html(
     redirect_count = 0
 
     while True:
-        await _validate_public_https_url(current_url, resolver)
-        try:
-            request = client.build_request(
-                "GET",
-                current_url,
-                headers={
-                    "accept": "text/html,application/xhtml+xml",
-                    "user-agent": "OrderLinkBot/1.0",
-                },
-            )
-            for sensitive_header in ("authorization", "cookie", "proxy-authorization"):
-                request.headers.pop(sensitive_header, None)
-            response = await client.send(request, stream=True, follow_redirects=False)
-        except httpx.TimeoutException as exc:
-            raise FetchTimeoutError("The product page timed out") from exc
-        except httpx.HTTPError as exc:
-            raise ProductFetchError("The product page could not be fetched") from exc
+        addresses = await _validate_public_https_url(current_url, resolver)
+        original_url = httpx.URL(current_url)
+        for index, address in enumerate(addresses):
+            try:
+                request = client.build_request(
+                    "GET",
+                    original_url.copy_with(host=address),
+                    headers={
+                        "accept": "text/html,application/xhtml+xml",
+                        "user-agent": "OrderLinkBot/1.0",
+                        "host": original_url.netloc.decode("ascii"),
+                        "connection": "close",
+                    },
+                )
+                request.extensions["sni_hostname"] = original_url.raw_host.decode("ascii")
+                for sensitive_header in ("authorization", "cookie", "proxy-authorization"):
+                    request.headers.pop(sensitive_header, None)
+                response = await client.send(request, stream=True, follow_redirects=False)
+                break
+            except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+                if index + 1 < len(addresses):
+                    continue
+                if isinstance(exc, httpx.TimeoutException):
+                    raise FetchTimeoutError("The product page timed out") from exc
+                raise ProductFetchError("The product page could not be fetched") from exc
+            except httpx.TimeoutException as exc:
+                raise FetchTimeoutError("The product page timed out") from exc
+            except httpx.HTTPError as exc:
+                raise ProductFetchError("The product page could not be fetched") from exc
 
         try:
             if response.status_code in REDIRECT_STATUSES:
@@ -192,7 +204,7 @@ async def _fetch_html(
             await response.aclose()
 
 
-async def _validate_public_https_url(url: str, resolver: Resolver) -> None:
+async def _validate_public_https_url(url: str, resolver: Resolver) -> Tuple[str, ...]:
     parsed = urlsplit(url)
     if (
         parsed.scheme.lower() != "https"
@@ -219,6 +231,7 @@ async def _validate_public_https_url(url: str, resolver: Resolver) -> None:
         raise UnsafeUrlError("The product hostname resolved unexpectedly") from exc
     if any(not address.is_global for address in parsed_addresses):
         raise UnsafeUrlError("The product URL resolves to a non-public address")
+    return tuple(str(address) for address in parsed_addresses)
 
 
 def _is_html_content_type(value: str) -> bool:

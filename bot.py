@@ -370,7 +370,7 @@ def build_web_application(
 def main() -> None:
     config = config_from_environment()
     anthropic_client = anthropic.Anthropic(api_key=config.anthropic_api_key)
-    http_client = httpx.AsyncClient(timeout=10.0)
+    http_client = httpx.AsyncClient(timeout=10.0, trust_env=False)
     repository = OrdersRepository(spreadsheet_from_environment())
     extractor = PublicProductExtractor(
         http_client,
