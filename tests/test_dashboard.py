@@ -131,6 +131,9 @@ def test_order_records_review_tab_and_count(client):
     browser.post("/admin/import", data={"csv": csv_text, "confirm": "yes"}, headers=headers)
     all_orders = browser.get("/admin/orders").text
     assert "<table class='orders-table'>" in all_orders
+    assert "<th>Link</th>" in all_orders
+    assert "href='https://example.com/a'" in all_orders
+    assert "View original sheet details" in all_orders
     assert "Needs review <span class='review-count'>2</span>" in all_orders
     review = browser.get("/admin/orders?view=review").text
     assert "Album" in review and "Photocard" in review
@@ -180,6 +183,18 @@ def test_review_can_create_shop_and_match_other_orders(client):
     orders = browser.get("/admin/orders").text
     assert "<dialog id='order-57'" in orders
     assert "value='PayPay'" in orders
+
+
+def test_unsafe_imported_link_is_not_clickable(client):
+    browser, _, _ = client
+    headers = {"origin": "http://testserver"}
+    csv_text = ("Date,Order No.,DN Line,Items,Link,Nominal,Arrived Date,Status,Box\n"
+                "26/2,91,Example,Item,javascript:alert(1),600,,Ordered,\n")
+    browser.post("/login", data={"password": "correct horse"}, headers=headers)
+    browser.post("/admin/import", data={"csv": csv_text, "confirm": "yes"}, headers=headers)
+    orders = browser.get("/admin/orders").text
+    assert "javascript:alert(1)" in orders
+    assert "href='javascript:alert(1)'" not in orders
 
 
 def test_admin_calculator_rate_persists_and_requires_login(client):

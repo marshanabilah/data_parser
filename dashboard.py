@@ -9,7 +9,7 @@ import sqlite3
 import time
 import asyncio
 from datetime import datetime
-from urllib.parse import parse_qs, urlencode
+from urllib.parse import parse_qs, urlencode, urlsplit
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -29,6 +29,20 @@ from order_parser import OrderParseError
 from pricing import calculate
 
 SESSION_SECONDS = 8 * 60 * 60
+
+
+def product_link(value: str) -> str:
+    value = value.strip()
+    try:
+        parsed = urlsplit(value)
+        if (parsed.scheme.lower() not in ("http", "https") or not parsed.hostname
+                or parsed.username is not None or parsed.password is not None
+                or any(ord(char) < 32 or ord(char) == 127 for char in value)):
+            return html.escape(value) if value else "—"
+        host = parsed.hostname
+    except ValueError:
+        return html.escape(value) if value else "—"
+    return f"<a class='product-link' href='{html.escape(value, quote=True)}' target='_blank' rel='noopener noreferrer' aria-label='Open product at {html.escape(host, quote=True)} (opens in a new tab)'>{html.escape(host)} ↗</a>"
 
 
 def password_hash(password: str, salt: str) -> str:
@@ -301,36 +315,36 @@ def create_app(db_path: str, credential: str, secret: str, secure: bool = True) 
         if not review_only:
             for order_id, order_date, name, dn, shop, shipping, status in store.search(query):
                 products = store.products(order_id)
-                lines = "".join(f"<li>{esc(title)} — ¥{price} × {quantity} <a href='{esc(link)}' rel='noreferrer'>Product</a></li>" for title, link, price, quantity in products)
+                lines = "".join(f"<li>{esc(title)} — ¥{price} × {quantity} {product_link(link)}</li>" for title, link, price, quantity in products)
+                product_links = "".join(f"<div>{product_link(link)}</div>" for _, link, _, _ in products) or "—"
                 summary = products[0][0] + (f" + {len(products) - 1} more" if len(products) > 1 else "") if products else "No product"
                 options = "".join(f"<option{' selected' if state == status else ''}>{esc(state)}</option>" for state in STATUSES)
                 details = f"<button type='button' class='open-order' data-dialog='order-{order_id}'>Details &amp; update</button><dialog id='order-{order_id}' aria-labelledby='title-{order_id}'><div class='dialog-heading'><h2 id='title-{order_id}'>Item #{order_id}</h2><button type='button' class='close-order' aria-label='Close'>×</button></div><div class='order-details'><p>Shop: {esc(shop)} · Shipping: {esc(shipping if shipping is not None else 'not set')} JPY</p><ul>{lines}</ul><form method='post'>{view_fields}<input type='hidden' name='id' value='{order_id}'><label>Status <select name='status'>{options}</select></label><button>Update status</button></form></div></dialog>"
-                result.append((order_id, f"<tr><td>#{order_id}</td><td>{esc(order_date)}</td><td>{esc(name)}</td><td>{esc(summary)}</td><td>{esc(status)}</td><td>{details}</td></tr>"))
+                result.append((order_id, f"<tr><td>#{order_id}</td><td>{esc(order_date)}</td><td>{esc(name)}</td><td>{esc(summary)}</td><td class='link-cell'>{product_links}</td><td>{esc(status)}</td><td>{details}</td></tr>"))
         for order_id, row, shop, nominal in store.imported(query):
             needs_review = shop.strip().casefold() not in known_shops
             if review_only and not needs_review:
                 continue
-            details = "".join(f"<li><strong>{esc(key)}:</strong> {esc(row[key]) or '—'}</li>" for key in ("Order No.", "Date", "DN Line", "Items", "Link", "Nominal", "Arrived Date", "Status", "Box"))
-            details += "".join(f"<li><strong>{esc(column['header'] or 'Extra column')}:</strong> {esc(column['value'])}</li>" for column in row.get("Extra columns", []) if column["value"])
+            details = "".join(f"<div><dt>{esc(label)}</dt><dd>{product_link(row[key]) if key == 'Link' else esc(row[key]) or '—'}</dd></div>" for key, label in (("Order No.", "Original order number"), ("Date", "Date"), ("DN Line", "LINE name"), ("Items", "Item"), ("Link", "Product link"), ("Nominal", "Original price"), ("Arrived Date", "Arrived date"), ("Status", "Original status"), ("Box", "Box")))
+            details += "".join(f"<div><dt>{esc(column['header'] or 'Extra column')}</dt><dd>{esc(column['value'])}</dd></div>" for column in row.get("Extra columns", []) if column["value"])
             price_note = "<p>Price missing or invalid.</p>" if not valid_jpy(nominal) else ""
             try:
-                from urllib.parse import urlsplit
                 parsed_link = urlsplit(row['Link'].strip())
                 host = parsed_link.hostname if parsed_link.scheme.lower() == 'https' and not parsed_link.username and not parsed_link.password else None
             except ValueError:
                 host = None
             remember = f"<label class='remember-domain'><input type='checkbox' name='remember_domain' value='yes' checked> Remember {esc(host)} for this shop and match other unassigned orders</label>" if host else ""
-            form = f"<button type='button' class='open-order' data-dialog='order-{order_id}'>Details &amp; review</button><dialog id='order-{order_id}' aria-labelledby='title-{order_id}'><div class='dialog-heading'><h2 id='title-{order_id}'>Item #{order_id}</h2><button type='button' class='close-order' aria-label='Close'>×</button></div><div class='order-details'><details class='original-values'><summary>Original sheet values</summary><ul>{details}</ul></details>{price_note}<form method='post'>{view_fields}<input type='hidden' name='kind' value='imported'><input type='hidden' name='id' value='{order_id}'><label>Shop <input name='shop' value='{esc(shop)}' list='known-shops'></label><label>If this shop is new, links per order <select name='new_rule'><option value=''>Choose for a new shop</option><option value='0'>One link</option><option value='1'>Multiple links</option></select></label>{remember}<label>Price (JPY) <input name='nominal' value='{esc(nominal)}'></label><button>Save review</button></form></div></dialog>"
+            form = f"<button type='button' class='open-order' data-dialog='order-{order_id}'>Details &amp; review</button><dialog id='order-{order_id}' aria-labelledby='title-{order_id}'><div class='dialog-heading'><h2 id='title-{order_id}'>Item #{order_id}</h2><button type='button' class='close-order' aria-label='Close'>×</button></div><div class='order-details'><details class='original-values'><summary>View original sheet details</summary><dl class='sheet-values'>{details}</dl></details>{price_note}<form method='post'>{view_fields}<input type='hidden' name='kind' value='imported'><input type='hidden' name='id' value='{order_id}'><label>Shop <input name='shop' value='{esc(shop)}' list='known-shops'></label><label>If this shop is new, links per order <select name='new_rule'><option value=''>Choose for a new shop</option><option value='0'>One link</option><option value='1'>Multiple links</option></select></label>{remember}<label>Price (JPY) <input name='nominal' value='{esc(nominal)}'></label><button>Save review</button></form></div></dialog>"
             review_text = "Needs review" if needs_review else "Shop known"
             price_flag = "<br><small>Price missing or invalid</small>" if not valid_jpy(nominal) else ""
-            result.append((order_id, f"<tr><td>#{order_id}</td><td>{esc(row['Date']) or '—'}</td><td>{esc(row['DN Line'])}</td><td>{esc(row['Items']) or '—'}</td><td><span class='review-label'>{review_text}</span><br>{esc(row['Status'])}{price_flag}</td><td>{form}</td></tr>"))
+            result.append((order_id, f"<tr><td>#{order_id}</td><td>{esc(row['Date']) or '—'}</td><td>{esc(row['DN Line'])}</td><td>{esc(row['Items']) or '—'}</td><td class='link-cell'>{product_link(row['Link'])}</td><td><span class='review-label'>{review_text}</span><br>{esc(row['Status'])}{price_flag}</td><td>{form}</td></tr>"))
         result.sort(key=lambda record: record[0], reverse=True)
         empty = "<div class='empty-state'>No matching orders yet. Try another search or add an order.</div>" if not result else ""
         search_args = "?" + urlencode({"q": query}) if query else ""
         review_args = "?" + urlencode({"view": "review", **({"q": query} if query else {})})
         tabs = f"<nav class='order-tabs' aria-label='Order views'><a href='/admin/orders{esc(search_args)}'{' aria-current=page' if not review_only else ''}>All orders</a><a href='/admin/orders{esc(review_args)}'{' aria-current=page' if review_only else ''}>Needs review <span class='review-count'>{review_count}</span></a></nav>"
         search_form = f"<form class='order-search' method='get'>{'<input type=hidden name=view value=review>' if review_only else ''}<label>Search by item ID or LINE display name <input name='q' value='{esc(query)}'></label><button>Search</button></form>"
-        table = "<div class='orders-table-wrap'><table class='orders-table'><thead><tr><th>Item ID</th><th>Date</th><th>LINE name</th><th>Item</th><th>Status</th><th>Details</th></tr></thead><tbody>" + "".join(row for _, row in result) + "</tbody></table></div>" if result else ""
+        table = "<div class='orders-table-wrap' role='region' aria-label='Order records' tabindex='0'><table class='orders-table'><thead><tr><th>Item ID</th><th>Date</th><th>LINE name</th><th>Item</th><th>Link</th><th>Status</th><th>Details</th></tr></thead><tbody>" + "".join(row for _, row in result) + "</tbody></table></div>" if result else ""
         shop_options = "".join(f"<option value='{esc(name)}'></option>" for name, _, _ in store.shops())
         saved_message = "<p class='save-notice' role='status'>Saved successfully. The review count has been updated.</p>" if request.query_params.get("saved") == "1" else ""
         dialog_script = "<script>document.addEventListener('click', function(event) { const open = event.target.closest('[data-dialog]'); if (open) document.getElementById(open.dataset.dialog).showModal(); const close = event.target.closest('.close-order'); if (close) close.closest('dialog').close(); });</script>"
