@@ -34,6 +34,8 @@ class DashboardStore:
             columns = {row[1] for row in db.execute("PRAGMA table_info(imported_orders)")}
             if "current_status" not in columns:
                 db.execute("ALTER TABLE imported_orders ADD COLUMN current_status TEXT")
+            if "assumed_year" not in columns:
+                db.execute("ALTER TABLE imported_orders ADD COLUMN assumed_year INTEGER")
             db.executemany("INSERT OR IGNORE INTO shops VALUES (?, ?, NULL)", DEFAULT_SHOPS.items())
             if not db.execute("SELECT 1 FROM dashboard_settings WHERE key = 'shop_domains_initialized'").fetchone():
                 db.executemany("INSERT OR IGNORE INTO shop_domains VALUES (?, ?)", DEFAULT_DOMAINS.items())
@@ -130,7 +132,9 @@ class DashboardStore:
                 db.executemany("INSERT INTO dashboard_products (order_id, name, link, price_jpy, quantity) VALUES (?, ?, ?, ?, ?)", [(cursor.lastrowid, p.name, p.link, p.price_jpy, p.quantity) for p in order.products])
             return ids
 
-    def import_orders(self, records):
+    def import_orders(self, records, assumed_year=None):
+        if assumed_year is not None and (type(assumed_year) is not int or not 1 <= assumed_year <= 9999):
+            raise ValueError("Invalid import year.")
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             fingerprint = hashlib.sha256(json.dumps(records, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
@@ -154,8 +158,8 @@ class DashboardStore:
                         raise ValueError("No available item IDs; no rows were imported.")
                     order_id = maximum
                 assigned.add(order_id)
-                saved.append((order_id, json.dumps(row, ensure_ascii=False), row["Nominal"]))
-            db.executemany("INSERT INTO imported_orders (id, original_json, nominal) VALUES (?, ?, ?)", saved)
+                saved.append((order_id, json.dumps(row, ensure_ascii=False), row["Nominal"], assumed_year))
+            db.executemany("INSERT INTO imported_orders (id, original_json, nominal, assumed_year) VALUES (?, ?, ?, ?)", saved)
             self._fill_missing_shops(db)
             db.execute("INSERT INTO csv_import_batches VALUES (?)", (fingerprint,))
             # Reserve imported IDs so future dashboard-created IDs cannot collide.
@@ -166,11 +170,12 @@ class DashboardStore:
 
     def imported(self, query=""):
         with self.connect() as db:
-            rows = db.execute("SELECT id, original_json, shop, nominal, current_status FROM imported_orders ORDER BY id DESC").fetchall()
+            rows = db.execute("SELECT id, original_json, shop, nominal, current_status, assumed_year FROM imported_orders ORDER BY id DESC").fetchall()
         result = []
-        for order_id, raw, shop, nominal, current_status in rows:
+        for order_id, raw, shop, nominal, current_status, assumed_year in rows:
             row = json.loads(raw)
             row["_current_status"] = current_status
+            row["_assumed_year"] = assumed_year
             if not query or query == str(order_id) or query.casefold() in row["DN Line"].casefold():
                 result.append((order_id, row, shop, nominal))
         return result

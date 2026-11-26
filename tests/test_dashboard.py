@@ -140,7 +140,7 @@ def test_order_records_review_tab_and_count(client):
                 "26/2,57,Bela,Album,https://example.com/a,600,,Ordered,\n"
                 "27/2,58,Ani,Photocard,https://example.com/b,,,Ordered,\n")
     browser.post("/login", data={"password": "correct horse"}, headers=headers)
-    browser.post("/admin/import", data={"csv": csv_text, "confirm": "yes"}, headers=headers)
+    browser.post("/admin/import", data={"csv": csv_text, "confirm": "yes", "assumed_year": "2026"}, headers=headers)
     all_orders = browser.get("/admin/orders").text
     assert "<table class='orders-table'>" in all_orders
     assert "<th>Link</th>" in all_orders
@@ -170,6 +170,25 @@ def test_known_shop_without_price_is_not_in_shop_review(client):
     assert "Needs review <span class='review-count'>0</span>" in orders
     assert "Price missing or invalid" in orders
     assert "value='Mercari'" in orders
+    assert "Shop known" not in orders
+
+
+def test_order_filters_combine_and_preserve_original_dates(client):
+    browser, _, _ = client
+    headers = {"origin": "http://testserver"}
+    csv_text = ("Date,Order No.,DN Line,Items,Link,Nominal,Arrived Date,Status,Box\n"
+                "26/2,77,Bela,Album,https://jp.mercari.com/item/a,,,Ordered,\n"
+                "27/2,78,Ani,Card,https://jp.mercari.com/item/b,600,,Arrived WH JP,\n")
+    browser.post("/login", data={"password": "correct horse"}, headers=headers)
+    browser.post("/admin/import", data={"csv": csv_text, "confirm": "yes", "assumed_year": "2026"}, headers=headers)
+    orders = browser.get("/admin/orders", params={"filter_shop": "Mercari", "filter_price": "missing", "filter_status": "Ordered"}).text
+    assert "Album" in orders and "Card" not in orders
+    assert "26/2" in orders
+    assert "Album" not in browser.get("/admin/orders", params={"filter_status": "Arrived WH JP"}).text
+    feb_26 = browser.get("/admin/orders", params={"date_from": "2026-02-26", "date_to": "2026-02-26"}).text
+    assert "Album" in feb_26 and "Card" not in feb_26
+    assert "Album" not in browser.get("/admin/orders", params={"date_from": "2027-01-01"}).text
+    assert "valid date range" in browser.get("/admin/orders", params={"date_from": "not-a-date"}).text
 
 
 def test_imported_order_status_can_change_without_losing_original(client):

@@ -8,7 +8,7 @@ import secrets
 import sqlite3
 import time
 import asyncio
-from datetime import datetime
+from datetime import date, datetime
 from urllib.parse import parse_qs, urlencode, urlsplit
 from zoneinfo import ZoneInfo
 
@@ -26,6 +26,7 @@ from dashboard_parser import parse_dashboard_order
 from dashboard_ui import page as render_page
 from link_extractor import PublicProductExtractor, ProductFetchError, UnsafeUrlError
 from order_parser import OrderParseError
+from order_filters import imported_date, within_dates
 from pricing import calculate
 from product_urls import extract_product_urls, single_https_host
 
@@ -181,7 +182,6 @@ def create_app(db_path: str, credential: str, secret: str, secure: bool = True) 
         if not csrf(request):
             return HTMLResponse("Invalid request", status_code=403)
         try:
-            from datetime import date
             form = await get_form(request)
             def one(key):
                 return form[key][0].strip()
@@ -273,21 +273,26 @@ def create_app(db_path: str, credential: str, secret: str, secure: bool = True) 
         if not valid(request):
             return RedirectResponse("/login", status_code=303)
         if request.method == "GET":
-            return page("<span class='eyebrow'>From Google Sheets</span><h1>Import orders</h1><p class='intro'>Choose an exported CSV or paste its contents. You'll review the rows before saving. Imports stay on this server and do not use AI.</p><form method='post'><label>CSV file <input type='file' accept='.csv,text/csv' id='csv-file'></label><label>CSV contents <textarea name='csv' id='csv-content' required></textarea></label><button>Review CSV</button></form><script>document.getElementById('csv-file').addEventListener('change', async function () { if (this.files[0]) document.getElementById('csv-content').value = await this.files[0].text(); });</script>", title="Import CSV", active="import")
+            return page("<span class='eyebrow'>From Google Sheets</span><h1>Import orders</h1><p class='intro'>Choose an exported CSV or paste its contents. You'll review the rows before saving. Imports stay on this server and do not use AI.</p><form method='post'><label>CSV file <input type='file' accept='.csv,text/csv' id='csv-file'></label><label>CSV contents <textarea name='csv' id='csv-content' required></textarea></label><label>Year for dates without a year (optional) <input type='number' name='assumed_year' min='1' max='9999' placeholder='e.g. 2026'></label><p>Enter a year only if it applies to the yearless dates in this file. Original date text stays unchanged.</p><button>Review CSV</button></form><script>document.getElementById('csv-file').addEventListener('change', async function () { if (this.files[0]) document.getElementById('csv-content').value = await this.files[0].text(); });</script>", title="Import CSV", active="import")
         if not csrf(request):
             return HTMLResponse("Invalid request", status_code=403)
         try:
             form = await get_form(request, max_bytes=4 * 1024 * 1024)
             source = form.get("csv", [""])[0]
+            year_text = form.get("assumed_year", [""])[0].strip()
+            if year_text and (not year_text.isascii() or not year_text.isdigit() or not 1 <= int(year_text) <= 9999):
+                raise ValueError("Enter a valid year between 1 and 9999, or leave it blank.")
+            assumed_year = int(year_text) if year_text else None
             records = parse_csv_orders(source)
             if form.get("confirm", [""])[0] == "yes":
-                ids = store.import_orders(records)
+                ids = store.import_orders(records, assumed_year=assumed_year)
                 renumbered = sum(order_id != int(row["Order No."]) for order_id, row in zip(ids, records))
                 return page(f"<h1>Import complete.</h1><p>{len(records)} orders saved; {renumbered} received a new item ID. Original order numbers remain in each record. Known shops are identified from product links; unknown shops need review.</p><a class='button' href='/admin/orders'>View orders</a>", title="Import complete", active="orders")
             def esc(value):
                 return html.escape(str(value), quote=True)
             rows = "".join(f"<tr><td>{esc(r['Order No.'])}</td><td>{esc(r['DN Line'])}</td><td>{esc(r['Items'])}</td><td>{esc(r['Nominal']) if r['Nominal'].strip() else 'Needs review'}</td><td>{esc(r['Status'])}</td></tr>" for r in records)
-            body = "<h1>Review CSV</h1><p>Each row becomes a separate order. Repeated or existing order numbers receive new item IDs; the original numbers stay available for reference. Dates are kept exactly as provided without adding a year. Known shops are matched from links on import; unknown shops need review. Blank prices remain visible.</p><div class='shop-table-wrap'><table class='shop-table'><thead><tr><th>Original order number</th><th>LINE name</th><th>Item</th><th>Price (JPY)</th><th>Original status</th></tr></thead><tbody>" + rows + "</tbody></table></div><form method='post'><input type='hidden' name='confirm' value='yes'><input type='hidden' name='csv' value='" + esc(source) + "'><button>Confirm import</button></form><a href='/admin/import'>Cancel</a>"
+            year_note = f"Year used for yearless dates: {assumed_year}." if assumed_year else "No year selected for yearless dates; they will be excluded from date filters."
+            body = "<h1>Review CSV</h1><p>Each row becomes a separate order. Repeated or existing order numbers receive new item IDs; the original numbers stay available for reference. Dates are kept exactly as provided. Known shops are matched from links on import; unknown shops need review. Blank prices remain visible.</p><p>" + year_note + "</p><div class='shop-table-wrap'><table class='shop-table'><thead><tr><th>Original order number</th><th>LINE name</th><th>Item</th><th>Price (JPY)</th><th>Original status</th></tr></thead><tbody>" + rows + "</tbody></table></div><form method='post'><input type='hidden' name='confirm' value='yes'><input type='hidden' name='assumed_year' value='" + esc(year_text) + "'><input type='hidden' name='csv' value='" + esc(source) + "'><button>Confirm import</button></form><a href='/admin/import'>Cancel</a>"
             return page(body, title="Review CSV", active="import")
         except ValueError as exc:
             return page("<h1>Could not import CSV</h1><p>" + html.escape(str(exc)) + "</p><a href='/admin/import'>Try again</a>", title="Import problem", active="import", status_code=400)
@@ -314,18 +319,40 @@ def create_app(db_path: str, credential: str, secret: str, secure: bool = True) 
                 params["view"] = "review"
             if form.get("q", [""])[0].strip():
                 params["q"] = form["q"][0][:200]
+            for field in ("filter_shop", "filter_status", "filter_price", "date_from", "date_to"):
+                if form.get(field, [""])[0].strip():
+                    params[field] = form[field][0][:100]
             return RedirectResponse("/admin/orders" + ("?" + urlencode(params) if params else ""), status_code=303)
         query = request.query_params.get("q", "")[:200]
         review_only = request.query_params.get("view") == "review"
+        filters = {key: request.query_params.get(key, "")[:100].strip() for key in ("filter_shop", "filter_status", "filter_price", "date_from", "date_to")}
+        filter_error = ""
+        try:
+            start = date.fromisoformat(filters["date_from"]) if filters["date_from"] else None
+            end = date.fromisoformat(filters["date_to"]) if filters["date_to"] else None
+            if start and end and start > end:
+                raise ValueError
+        except ValueError:
+            start = end = None
+            filter_error = "Please use a valid date range, with the start before the end."
         imported = store.imported()
+        native = store.search()
         known_shops = {name.casefold() for name, _, _ in store.shops()}
         review_count = sum(shop.strip().casefold() not in known_shops for _, _, shop, _ in imported)
         result = []
         def esc(value):
             return html.escape(str(value), quote=True)
-        view_fields = f"<input type='hidden' name='view' value='{'review' if review_only else 'all'}'><input type='hidden' name='q' value='{esc(query)}'>"
+        view_fields = f"<input type='hidden' name='view' value='{'review' if review_only else 'all'}'><input type='hidden' name='q' value='{esc(query)}'>" + "".join(f"<input type='hidden' name='{key}' value='{esc(value)}'>" for key, value in filters.items())
+        def matches(shop, status, missing_price, order_date):
+            return (not filter_error
+                    and (not filters["filter_shop"] or (filters["filter_shop"] == "__unknown__" and shop.strip().casefold() not in known_shops) or shop.casefold() == filters["filter_shop"].casefold())
+                    and (not filters["filter_status"] or status == filters["filter_status"])
+                    and (filters["filter_price"] != "missing" or missing_price)
+                    and within_dates(order_date, start, end))
         if not review_only:
             for order_id, order_date, name, dn, shop, shipping, status in store.search(query):
+                if not matches(shop, status, False, imported_date(order_date)):
+                    continue
                 products = store.products(order_id)
                 lines = "".join(f"<li>{esc(title)} — ¥{price} × {quantity} {product_link(link)}</li>" for title, link, price, quantity in products)
                 link_markup = "".join(f"<div>{product_link(link)}</div>" for _, link, _, _ in products) or "—"
@@ -337,29 +364,46 @@ def create_app(db_path: str, credential: str, secret: str, secure: bool = True) 
             needs_review = shop.strip().casefold() not in known_shops
             if review_only and not needs_review:
                 continue
+            current_status = row.get('_current_status')
+            if not matches(shop, current_status or row['Status'], not valid_jpy(nominal), imported_date(row['Date'], row.get('_assumed_year'))):
+                continue
             details = "".join(f"<div><dt>{esc(label)}</dt><dd>{product_links(row[key]) if key == 'Link' else esc(row[key]) or '—'}</dd></div>" for key, label in (("Order No.", "Original order number"), ("Date", "Date"), ("DN Line", "LINE name"), ("Items", "Item"), ("Link", "Product link"), ("Nominal", "Original price"), ("Arrived Date", "Arrived date"), ("Status", "Original status"), ("Box", "Box")))
             details += "".join(f"<div><dt>{esc(column['header'] or 'Extra column')}</dt><dd>{esc(column['value'])}</dd></div>" for column in row.get("Extra columns", []) if column["value"])
             price_note = "<p>Price missing or invalid.</p>" if not valid_jpy(nominal) else ""
             host = single_https_host(row['Link'])
             remember = f"<label class='remember-domain'><input type='checkbox' name='remember_domain' value='yes' checked> Remember {esc(host)} for this shop and match other unassigned orders</label>" if host else ""
-            current_status = row.get('_current_status')
             original_option = f"<option value='' selected>Keep original: {esc(row['Status']) or 'not set'}</option>" if not current_status else ""
             status_options = original_option + "".join(f"<option{' selected' if state == current_status else ''}>{esc(state)}</option>" for state in STATUSES)
             form = f"<button type='button' class='open-order' data-dialog='order-{order_id}'>Details &amp; review</button><dialog id='order-{order_id}' aria-labelledby='title-{order_id}'><div class='dialog-heading'><h2 id='title-{order_id}'>Item #{order_id}</h2><button type='button' class='close-order' aria-label='Close'>×</button></div><div class='order-details'><details class='original-values'><summary>View original sheet details</summary><dl class='sheet-values'>{details}</dl></details>{price_note}<form method='post'>{view_fields}<input type='hidden' name='kind' value='imported'><input type='hidden' name='id' value='{order_id}'><label>Shop <input name='shop' value='{esc(shop)}' list='known-shops'></label><label>If this shop is new, links per order <select name='new_rule'><option value=''>Choose for a new shop</option><option value='0'>One link</option><option value='1'>Multiple links</option></select></label>{remember}<label>Price (JPY) <input name='nominal' value='{esc(nominal)}'></label><label>Status <select name='status'>{status_options}</select></label><button>Save review</button></form></div></dialog>"
-            review_text = "Needs review" if needs_review else "Shop known"
+            review_badge = "<span class='review-label'>Needs review</span><br>" if needs_review else ""
             price_flag = "<br><small>Price missing or invalid</small>" if not valid_jpy(nominal) else ""
-            result.append((order_id, f"<tr><td>#{order_id}</td><td>{esc(row['Date']) or '—'}</td><td>{esc(row['DN Line'])}</td><td>{esc(row['Items']) or '—'}</td><td class='link-cell'>{product_links(row['Link'])}</td><td><span class='review-label'>{review_text}</span><br>{esc(current_status or row['Status'])}{price_flag}</td><td>{form}</td></tr>"))
+            result.append((order_id, f"<tr><td>#{order_id}</td><td>{esc(row['Date']) or '—'}</td><td>{esc(row['DN Line'])}</td><td>{esc(row['Items']) or '—'}</td><td class='link-cell'>{product_links(row['Link'])}</td><td>{review_badge}{esc(current_status or row['Status'])}{price_flag}</td><td>{form}</td></tr>"))
         result.sort(key=lambda record: record[0], reverse=True)
         empty = "<div class='empty-state'>No matching orders yet. Try another search or add an order.</div>" if not result else ""
-        search_args = "?" + urlencode({"q": query}) if query else ""
-        review_args = "?" + urlencode({"view": "review", **({"q": query} if query else {})})
+        applied = {key: value for key, value in filters.items() if value}
+        if query:
+            applied["q"] = query
+        search_args = "?" + urlencode(applied) if applied else ""
+        review_args = "?" + urlencode({"view": "review", **applied})
         tabs = f"<nav class='order-tabs' aria-label='Order views'><a href='/admin/orders{esc(search_args)}'{' aria-current=page' if not review_only else ''}>All orders</a><a href='/admin/orders{esc(review_args)}'{' aria-current=page' if review_only else ''}>Needs review <span class='review-count'>{review_count}</span></a></nav>"
-        search_form = f"<form class='order-search' method='get'>{'<input type=hidden name=view value=review>' if review_only else ''}<label>Search by item ID or LINE display name <input name='q' value='{esc(query)}'></label><button>Search</button></form>"
+        shop_names = sorted({shop for _, _, _, _, shop, _, _ in native if shop} | {shop for _, _, shop, _ in imported if shop}, key=str.casefold)
+        statuses = sorted({status for _, _, _, _, _, _, status in native if status} | {row.get('_current_status') or row['Status'] for _, row, _, _ in imported if row.get('_current_status') or row['Status']}, key=str.casefold)
+        def options(values, selected):
+            return "".join(f"<option value='{esc(value)}'{' selected' if value == selected else ''}>{esc(value)}</option>" for value in values)
+        search_form = (f"<form class='order-filters' method='get'>{'<input type=hidden name=view value=review>' if review_only else ''}"
+                       f"<label>Search by item ID or LINE display name <input name='q' value='{esc(query)}'></label>"
+                       f"<label>Shop <select name='filter_shop'><option value=''>All shops</option><option value='__unknown__'{' selected' if filters['filter_shop'] == '__unknown__' else ''}>Unknown shops</option>{options(shop_names, filters['filter_shop'])}</select></label>"
+                       f"<label>Status <select name='filter_status'><option value=''>All statuses</option>{options(statuses, filters['filter_status'])}</select></label>"
+                       f"<label>Price <select name='filter_price'><option value=''>All prices</option><option value='missing'{' selected' if filters['filter_price'] == 'missing' else ''}>Missing or invalid</option></select></label>"
+                       f"<label>From <input type='date' name='date_from' value='{esc(filters['date_from'])}'></label>"
+                       f"<label>To <input type='date' name='date_to' value='{esc(filters['date_to'])}'></label>"
+                       f"<div class='filter-actions'><button>Apply filters</button><a href='/admin/orders{'?view=review' if review_only else ''}'>Clear</a></div></form>")
         table = "<div class='orders-table-wrap' role='region' aria-label='Order records' tabindex='0'><table class='orders-table'><thead><tr><th>Item ID</th><th>Date</th><th>LINE name</th><th>Item</th><th>Link</th><th>Status</th><th>Details</th></tr></thead><tbody>" + "".join(row for _, row in result) + "</tbody></table></div>" if result else ""
         shop_options = "".join(f"<option value='{esc(name)}'></option>" for name, _, _ in store.shops())
         saved_message = "<p class='save-notice' role='status'>Saved successfully. The review count has been updated.</p>" if request.query_params.get("saved") == "1" else ""
         dialog_script = "<script>document.addEventListener('click', function(event) { const open = event.target.closest('[data-dialog]'); if (open) document.getElementById(open.dataset.dialog).showModal(); const close = event.target.closest('.close-order'); if (close) close.closest('dialog').close(); });</script>"
-        return page("<span class='eyebrow'>Track your items</span><h1>Orders</h1><p class='intro'>Find an order and update its journey. Needs review shows shops not yet in your shop settings.</p>" + saved_message + tabs + search_form + table + empty + f"<datalist id='known-shops'>{shop_options}</datalist>" + dialog_script, title="Orders", active="orders")
+        error_message = f"<p role='alert'>{esc(filter_error)}</p>" if filter_error else ""
+        return page("<span class='eyebrow'>Track your items</span><h1>Orders</h1><p class='intro'>Find an order and update its journey. Needs review shows shops not yet in your shop settings.</p>" + saved_message + tabs + error_message + search_form + "<p class='hint'>Date filters exclude records without a valid date and year.</p>" + table + empty + f"<datalist id='known-shops'>{shop_options}</datalist>" + dialog_script, title="Orders", active="orders")
 
     async def shops(request: Request):
         if not valid(request):
