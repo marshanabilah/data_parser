@@ -1,0 +1,72 @@
+"""Transactional storage for dashboard shop settings and confirmed orders."""
+
+import sqlite3
+from typing import Optional, Sequence
+
+from dashboard_orders import OrderRecord, STATUSES
+
+DEFAULT_SHOPS = {"Mercari": False, "Rakuten": False, "Fril": False, "UMS": True, "Lashinbang": True, "Weverse": True}
+
+
+class DashboardStore:
+    def __init__(self, path: str):
+        self.path = path
+        with self.connect() as db:
+            db.executescript("""
+                CREATE TABLE IF NOT EXISTS shops (name TEXT PRIMARY KEY COLLATE NOCASE, allows_multiple INTEGER NOT NULL, shipping_jpy INTEGER);
+                CREATE TABLE IF NOT EXISTS order_batches (token TEXT PRIMARY KEY);
+                CREATE TABLE IF NOT EXISTS dashboard_orders (id INTEGER PRIMARY KEY AUTOINCREMENT, batch_token TEXT NOT NULL, order_date TEXT NOT NULL, line_name TEXT NOT NULL, dn_line TEXT NOT NULL, shop TEXT NOT NULL, shipping_jpy INTEGER, status TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS dashboard_products (id INTEGER PRIMARY KEY, order_id INTEGER NOT NULL REFERENCES dashboard_orders(id), name TEXT NOT NULL, link TEXT NOT NULL, price_jpy INTEGER NOT NULL, quantity INTEGER NOT NULL);
+            """)
+            db.executemany("INSERT OR IGNORE INTO shops VALUES (?, ?, NULL)", DEFAULT_SHOPS.items())
+
+    def connect(self):
+        db = sqlite3.connect(self.path, timeout=10)
+        db.execute("PRAGMA foreign_keys = ON")
+        return db
+
+    def shops(self):
+        with self.connect() as db:
+            return db.execute("SELECT name, allows_multiple, shipping_jpy FROM shops ORDER BY name").fetchall()
+
+    def set_shop(self, name: str, allows_multiple: bool, shipping_jpy: Optional[int]):
+        if not name.strip() or type(allows_multiple) is not bool or (shipping_jpy is not None and (type(shipping_jpy) is not int or shipping_jpy < 0)):
+            raise ValueError("Invalid shop settings")
+        with self.connect() as db:
+            db.execute("INSERT INTO shops VALUES (?, ?, ?) ON CONFLICT(name) DO UPDATE SET allows_multiple=excluded.allows_multiple, shipping_jpy=excluded.shipping_jpy", (name.strip(), allows_multiple, shipping_jpy))
+
+    def save(self, token: str, records: Sequence[OrderRecord]):
+        if not token or len(token) > 200 or not records:
+            raise ValueError("A confirmation token and records are required")
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if db.execute("SELECT 1 FROM order_batches WHERE token = ?", (token,)).fetchone():
+                return [row[0] for row in db.execute("SELECT id FROM dashboard_orders WHERE batch_token = ? ORDER BY id", (token,))]
+            db.execute("INSERT INTO order_batches VALUES (?)", (token,))
+            ids = []
+            for order in records:
+                setting = db.execute("SELECT allows_multiple FROM shops WHERE name = ?", (order.shop,)).fetchone()
+                if not setting or (not setting[0] and len(order.products) != 1) or order.status != "Purchased":
+                    raise ValueError("Invalid shop or order status")
+                cursor = db.execute("INSERT INTO dashboard_orders (batch_token, order_date, line_name, dn_line, shop, shipping_jpy, status) VALUES (?, ?, ?, ?, ?, ?, ?)", (token, order.order_date.isoformat(), order.line_name, order.dn_line, order.shop, order.shipping_jpy, order.status))
+                ids.append(cursor.lastrowid)
+                db.executemany("INSERT INTO dashboard_products (order_id, name, link, price_jpy, quantity) VALUES (?, ?, ?, ?, ?)", [(cursor.lastrowid, p.name, p.link, p.price_jpy, p.quantity) for p in order.products])
+            return ids
+
+    def search(self, query: str = ""):
+        with self.connect() as db:
+            return db.execute("SELECT id, order_date, line_name, dn_line, shop, shipping_jpy, status FROM dashboard_orders WHERE CAST(id AS TEXT) = ? OR instr(lower(line_name), lower(?)) > 0 OR instr(lower(dn_line), lower(?)) > 0 ORDER BY id DESC", (query, query, query)).fetchall()
+
+    def products(self, order_id: int):
+        with self.connect() as db:
+            return db.execute("SELECT name, link, price_jpy, quantity FROM dashboard_products WHERE order_id = ? ORDER BY id", (order_id,)).fetchall()
+
+    def has_link(self, link: str) -> bool:
+        with self.connect() as db:
+            return db.execute("SELECT 1 FROM dashboard_products WHERE link = ? LIMIT 1", (link,)).fetchone() is not None
+
+    def set_status(self, order_id: int, status: str):
+        if status not in STATUSES:
+            raise ValueError("Invalid status")
+        with self.connect() as db:
+            return db.execute("UPDATE dashboard_orders SET status = ? WHERE id = ?", (status, order_id)).rowcount == 1

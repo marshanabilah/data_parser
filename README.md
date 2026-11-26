@@ -6,10 +6,11 @@ its setup and behavior are described below.
 
 ## Dashboard status
 
-The dashboard currently provides a single-admin login, logout, and a protected
-placeholder page. Sessions expire after eight hours. The public page is a
-placeholder; order management, customer item lookup, and the JPY-to-IDR price
-estimator are planned but not implemented. Payment verification is postponed.
+The dashboard provides a single-admin login and order-management workflow.
+Admins can configure shops, paste an order for parsing, review and save records,
+search orders, and change statuses. Sessions expire after eight hours. The
+public page is a placeholder; customer item lookup and the JPY-to-IDR price
+estimator are not implemented. Payment verification is postponed.
 
 To try the dashboard locally, install the existing dependencies, then follow
 [DASHBOARD-SETUP.md](DASHBOARD-SETUP.md) to generate an admin password hash,
