@@ -1,6 +1,7 @@
 """Transactional storage for dashboard shop settings and confirmed orders."""
 
 import sqlite3
+import json
 from typing import Optional, Sequence
 
 from dashboard_orders import OrderRecord, STATUSES
@@ -17,6 +18,7 @@ class DashboardStore:
                 CREATE TABLE IF NOT EXISTS order_batches (token TEXT PRIMARY KEY);
                 CREATE TABLE IF NOT EXISTS dashboard_orders (id INTEGER PRIMARY KEY AUTOINCREMENT, batch_token TEXT NOT NULL, order_date TEXT NOT NULL, line_name TEXT NOT NULL, dn_line TEXT NOT NULL, shop TEXT NOT NULL, shipping_jpy INTEGER, status TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS dashboard_products (id INTEGER PRIMARY KEY, order_id INTEGER NOT NULL REFERENCES dashboard_orders(id), name TEXT NOT NULL, link TEXT NOT NULL, price_jpy INTEGER NOT NULL, quantity INTEGER NOT NULL);
+                CREATE TABLE IF NOT EXISTS imported_orders (id INTEGER PRIMARY KEY, original_json TEXT NOT NULL, shop TEXT NOT NULL DEFAULT '', nominal TEXT NOT NULL DEFAULT '');
             """)
             db.executemany("INSERT OR IGNORE INTO shops VALUES (?, ?, NULL)", DEFAULT_SHOPS.items())
 
@@ -57,6 +59,35 @@ class DashboardStore:
                 ids.append(cursor.lastrowid)
                 db.executemany("INSERT INTO dashboard_products (order_id, name, link, price_jpy, quantity) VALUES (?, ?, ?, ?, ?)", [(cursor.lastrowid, p.name, p.link, p.price_jpy, p.quantity) for p in order.products])
             return ids
+
+    def import_orders(self, records):
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            for row in records:
+                order_id = int(row["Order No."])
+                if db.execute("SELECT 1 FROM dashboard_orders WHERE id = ? UNION ALL SELECT 1 FROM imported_orders WHERE id = ?", (order_id, order_id)).fetchone():
+                    raise ValueError(f"Item ID {order_id} already exists; no rows were imported.")
+            db.executemany("INSERT INTO imported_orders (id, original_json, nominal) VALUES (?, ?, ?)", [(int(row["Order No."]), json.dumps(row, ensure_ascii=False), row["Nominal"]) for row in records])
+            # Reserve imported IDs so future dashboard-created IDs cannot collide.
+            maximum = max(int(row["Order No."]) for row in records)
+            db.execute("INSERT INTO sqlite_sequence (name, seq) SELECT 'dashboard_orders', ? WHERE NOT EXISTS (SELECT 1 FROM sqlite_sequence WHERE name = 'dashboard_orders')", (maximum,))
+            db.execute("UPDATE sqlite_sequence SET seq = max(seq, ?) WHERE name = 'dashboard_orders'", (maximum,))
+
+    def imported(self, query=""):
+        with self.connect() as db:
+            rows = db.execute("SELECT id, original_json, shop, nominal FROM imported_orders ORDER BY id DESC").fetchall()
+        result = []
+        for order_id, raw, shop, nominal in rows:
+            row = json.loads(raw)
+            if not query or query == str(order_id) or query.casefold() in row["DN Line"].casefold():
+                result.append((order_id, row, shop, nominal))
+        return result
+
+    def update_imported(self, order_id, shop, nominal):
+        if len(shop) > 100 or len(nominal) > 100:
+            raise ValueError("Shop or price is too long")
+        with self.connect() as db:
+            return db.execute("UPDATE imported_orders SET shop = ?, nominal = ? WHERE id = ?", (shop.strip(), nominal.strip(), order_id)).rowcount == 1
 
     def search(self, query: str = ""):
         with self.connect() as db:

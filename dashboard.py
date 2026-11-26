@@ -12,7 +12,6 @@ from datetime import datetime
 from urllib.parse import parse_qs
 from zoneinfo import ZoneInfo
 
-import anthropic
 import httpx
 
 from starlette.applications import Starlette
@@ -111,10 +110,10 @@ def create_app(db_path: str, credential: str, secret: str, secure: bool = True) 
         try:
             form = await get_form(request)
             line_name, message = (form.get(key, [""])[0].strip() for key in ("line_name", "message"))
-            key = os.environ.get("ANTHROPIC_API_KEY", "")
+            key = os.environ.get("OPENROUTER_API_KEY", "").strip()
             if not line_name or not message or not key:
-                raise ValueError("LINE name, order text, and ANTHROPIC_API_KEY are required.")
-            shop, parsed = await asyncio.to_thread(parse_dashboard_order, message, anthropic.Anthropic(api_key=key))
+                raise ValueError("LINE name, order text, and OPENROUTER_API_KEY are required.")
+            shop, parsed = await asyncio.to_thread(parse_dashboard_order, message, key)
             settings = next((row for row in store.shops() if shop and row[0].casefold() == shop.casefold()), None)
             if settings:
                 shop = settings[0]
@@ -145,8 +144,8 @@ def create_app(db_path: str, credential: str, secret: str, secure: bool = True) 
                 warning = "<p>This link already exists in an order.</p>" if store.has_link(item.link) else ""
                 fields += f"<fieldset><legend>Product</legend>{warning}<label>DN Line <input name='dn' value='{esc(item.dn_line)}' required></label><label>Link <input name='link' value='{esc(item.link)}' readonly></label><label>Name <input name='name' value='{esc(name)}' required></label><label>Price (JPY) <input name='price' type='number' min='0' value='{esc(yen)}' required></label><label>Quantity <input name='quantity' type='number' min='1' value='1' required></label></fieldset>"
             return page("<span class='eyebrow'>Almost there</span><h1>Review your order.</h1><p class='intro'>Check the details before saving.</p><form method='post' action='/admin/confirm'>" + fields + "<button>Confirm and save</button></form><a href='/admin/intake'>Cancel</a>", title="Review order", active="intake")
-        except (ValueError, OrderParseError, anthropic.APIError):
-            return HTMLResponse("Could not parse the order. Check the order details and API configuration, then try again.", status_code=400)
+        except (ValueError, OrderParseError) as exc:
+            return page("<h1>Could not parse this order.</h1><p>" + html.escape(str(exc)) + "</p><a href='/admin/intake'>Try again</a>", title="Parsing problem", active="intake", status_code=400)
 
     async def confirm(request: Request):
         if not valid(request):
@@ -233,7 +232,7 @@ def create_app(db_path: str, credential: str, secret: str, secure: bool = True) 
             selected_multi = " selected" if multiple else ""
             value = "" if fee is None else str(fee)
             rows.append(f"<tr><td data-label='Shop'><strong>{safe_name}</strong><form id='shop-{index}' method='post'></form><input form='shop-{index}' type='hidden' name='name' value='{safe_name}'></td><td data-label='Links per order'><select form='shop-{index}' name='allows_multiple' aria-label='Links per order for {safe_name}'><option value='0'{selected_single}>One link</option><option value='1'{selected_multi}>Multiple links</option></select></td><td data-label='Suggested shipping (JPY)'><input form='shop-{index}' type='number' min='0' name='shipping_jpy' value='{value}' aria-label='Suggested shipping in JPY for {safe_name}' placeholder='Not set'></td><td><button form='shop-{index}' class='save-row'>Save<span class='sr-only'> {safe_name}</span></button></td></tr>")
-        return page("<span class='eyebrow'>Your preferences</span><h1>Shop settings</h1><p class='intro'>Choose how many links each shop allows and set an optional suggested shipping fee.</p><div class='shop-table-wrap'><table class='shop-table'><thead><tr><th>Shop</th><th>Links per order</th><th>Suggested shipping (JPY)</th><th><span class='sr-only'>Actions</span></th></tr></thead><tbody>" + "".join(rows) + "</tbody></table></div><h2 class='add-shop-heading'>Add a shop</h2><form method='post' class='add-shop-form'><label>Shop <input name='name' required></label> <label>Links <select name='allows_multiple'><option value='0'>One link</option><option value='1'>Multiple links</option></select></label> <label>Suggested shipping (JPY) <input type='number' min='0' name='shipping_jpy'></label> <button>Add shop</button></form>", title="Shop settings", active="shops")
+        return page("<span class='eyebrow'>Your preferences</span><h1>Shop settings</h1><p class='intro'>Choose how many links each shop allows and set an optional suggested shipping fee.</p><h2>Add a shop</h2><form method='post' class='add-shop-form'><label>Shop <input name='name' required></label> <label>Links <select name='allows_multiple'><option value='0'>One link</option><option value='1'>Multiple links</option></select></label> <label>Suggested shipping (JPY) <input type='number' min='0' name='shipping_jpy'></label> <button>Add shop</button></form><h2 class='add-shop-heading'>Saved shops</h2><div class='shop-table-wrap'><table class='shop-table'><thead><tr><th>Shop</th><th>Links per order</th><th>Suggested shipping (JPY)</th><th><span class='sr-only'>Actions</span></th></tr></thead><tbody>" + "".join(rows) + "</tbody></table></div>", title="Shop settings", active="shops")
 
     async def logout(request: Request):
         if not csrf(request):

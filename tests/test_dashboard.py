@@ -77,7 +77,7 @@ def test_intake_parses_preview_and_requires_price(client, monkeypatch):
     import dashboard
 
     browser, _, _ = client
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     monkeypatch.setattr(dashboard, "parse_dashboard_order", lambda *args: ("UMS", (SubmittedLink(dn_line="DN1", link="https://example.com/a"),)))
 
     async def extract(_self, _link):
