@@ -9,7 +9,7 @@ import sqlite3
 import time
 import asyncio
 from datetime import datetime
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlencode
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -97,12 +97,14 @@ def create_app(db_path: str, credential: str, secret: str, secure: bool = True) 
         content = f"<span class='eyebrow'>Your workspace</span><h1>Good to see you.</h1><p class='intro'>A little home for all your jastip orders, from purchase to delivery.</p><div class='banner'><div><span class='eyebrow'>Ready when you are</span><h2>Let's get your orders organised.</h2><p>Paste an order collection and check the details before saving.</p></div><a class='button' href='/admin/intake'>Parse an order</a></div><div class='section-title'><div><span class='eyebrow'>At a glance</span><h2>Your order desk</h2></div><span class='hint'>{count} saved {'record' if count == 1 else 'records'}</span></div><div class='actions'><a class='action-card' href='/admin/orders'><span class='tag'>Track &amp; update</span><h2>Orders</h2><p>Find an item and follow its journey from Japan to Indonesia.</p><span class='go'>View orders →</span></a><a class='action-card' href='/admin/shops'><span class='tag'>Your preferences</span><h2>Shop settings</h2><p>Set link rules and suggested shipping fees for each shop.</p><span class='go'>Manage shops →</span></a></div><form action='/logout' method='post'><button>Sign out</button></form>"
         return page(content, title="Overview", active="overview")
 
-    async def get_form(request: Request):
+    async def get_form(request: Request, max_bytes=65536):
         if request.headers.get("content-type", "").split(";")[0] != "application/x-www-form-urlencoded":
             raise ValueError("Invalid form")
-        body = await request.body()
-        if len(body) > 65536:
-            raise ValueError("Form too large")
+        body = bytearray()
+        async for chunk in request.stream():
+            body.extend(chunk)
+            if len(body) > max_bytes:
+                raise ValueError("Form too large. Split the CSV into smaller files and try again.")
         return parse_qs(body.decode("utf-8", errors="replace"), keep_blank_values=True)
 
     async def intake(request: Request):
@@ -249,16 +251,17 @@ def create_app(db_path: str, credential: str, secret: str, secure: bool = True) 
         if not csrf(request):
             return HTMLResponse("Invalid request", status_code=403)
         try:
-            form = await get_form(request)
+            form = await get_form(request, max_bytes=4 * 1024 * 1024)
             source = form.get("csv", [""])[0]
             records = parse_csv_orders(source)
             if form.get("confirm", [""])[0] == "yes":
-                store.import_orders(records)
-                return page(f"<h1>Import complete.</h1><p>{len(records)} orders saved. Imported orders need review because their shop is not in the CSV.</p><a class='button' href='/admin/orders'>View orders</a>", title="Import complete", active="orders")
+                ids = store.import_orders(records)
+                renumbered = sum(order_id != int(row["Order No."]) for order_id, row in zip(ids, records))
+                return page(f"<h1>Import complete.</h1><p>{len(records)} orders saved; {renumbered} received a new item ID. Original order numbers remain in each record. Imported orders need review because their shop is not in the CSV.</p><a class='button' href='/admin/orders'>View orders</a>", title="Import complete", active="orders")
             def esc(value):
                 return html.escape(str(value), quote=True)
             rows = "".join(f"<tr><td>{esc(r['Order No.'])}</td><td>{esc(r['DN Line'])}</td><td>{esc(r['Items'])}</td><td>{esc(r['Nominal']) if r['Nominal'].strip() else 'Needs review'}</td><td>{esc(r['Status'])}</td></tr>" for r in records)
-            body = "<h1>Review CSV</h1><p>All rows will need review because the shop is missing. Blank prices also need review. Existing item IDs will stop the import; no rows will be saved.</p><div class='shop-table-wrap'><table class='shop-table'><thead><tr><th>Item ID</th><th>LINE name</th><th>Item</th><th>Price (JPY)</th><th>Original status</th></tr></thead><tbody>" + rows + "</tbody></table></div><form method='post'><input type='hidden' name='confirm' value='yes'><input type='hidden' name='csv' value='" + esc(source) + "'><button>Confirm import</button></form><a href='/admin/import'>Cancel</a>"
+            body = "<h1>Review CSV</h1><p>Each row becomes a separate order. Repeated or existing order numbers receive new item IDs; the original numbers stay available for reference. Dates are kept exactly as provided without adding a year. All rows will need review because the shop is missing; blank prices also need review.</p><div class='shop-table-wrap'><table class='shop-table'><thead><tr><th>Original order number</th><th>LINE name</th><th>Item</th><th>Price (JPY)</th><th>Original status</th></tr></thead><tbody>" + rows + "</tbody></table></div><form method='post'><input type='hidden' name='confirm' value='yes'><input type='hidden' name='csv' value='" + esc(source) + "'><button>Confirm import</button></form><a href='/admin/import'>Cancel</a>"
             return page(body, title="Review CSV", active="import")
         except ValueError as exc:
             return page("<h1>Could not import CSV</h1><p>" + html.escape(str(exc)) + "</p><a href='/admin/import'>Try again</a>", title="Import problem", active="import", status_code=400)
@@ -279,23 +282,45 @@ def create_app(db_path: str, credential: str, secret: str, secure: bool = True) 
                     raise ValueError("Unknown order")
             except (ValueError, KeyError):
                 return HTMLResponse("Invalid status update", status_code=400)
-            return RedirectResponse("/admin/orders", status_code=303)
+            params = {}
+            if form.get("view", [""])[0] == "review":
+                params["view"] = "review"
+            if form.get("q", [""])[0].strip():
+                params["q"] = form["q"][0][:200]
+            return RedirectResponse("/admin/orders" + ("?" + urlencode(params) if params else ""), status_code=303)
         query = request.query_params.get("q", "")[:200]
+        review_only = request.query_params.get("view") == "review"
+        imported = store.imported()
+        review_count = sum(not shop.strip() or not valid_jpy(nominal) for _, _, shop, nominal in imported)
         result = []
-        for order_id, order_date, name, dn, shop, shipping, status in store.search(query):
-            def escape(value):
-                return html.escape(str(value))
-            lines = "".join(f"<li>{escape(title)} — ¥{price} × {quantity} <a href='{html.escape(link, quote=True)}' rel='noreferrer'>Product</a></li>" for title, link, price, quantity in store.products(order_id))
-            options = "".join(f"<option{' selected' if state == status else ''}>{escape(state)}</option>" for state in STATUSES)
-            result.append(f"<section><h2>Item {order_id} — {escape(shop)}</h2><p>{escape(order_date)} · {escape(name)} · {escape(dn)} · Shipping: {escape(shipping if shipping is not None else 'not set')} JPY</p><ul>{lines}</ul><form method='post'><input type='hidden' name='id' value='{order_id}'><label>Status <select name='status'>{options}</select></label><button>Update</button></form></section>")
+        def esc(value):
+            return html.escape(str(value), quote=True)
+        view_fields = f"<input type='hidden' name='view' value='{'review' if review_only else 'all'}'><input type='hidden' name='q' value='{esc(query)}'>"
+        if not review_only:
+            for order_id, order_date, name, dn, shop, shipping, status in store.search(query):
+                products = store.products(order_id)
+                lines = "".join(f"<li>{esc(title)} — ¥{price} × {quantity} <a href='{esc(link)}' rel='noreferrer'>Product</a></li>" for title, link, price, quantity in products)
+                summary = products[0][0] + (f" + {len(products) - 1} more" if len(products) > 1 else "") if products else "No product"
+                options = "".join(f"<option{' selected' if state == status else ''}>{esc(state)}</option>" for state in STATUSES)
+                details = f"<details><summary>Details &amp; update</summary><div class='order-details'><p>Shop: {esc(shop)} · Shipping: {esc(shipping if shipping is not None else 'not set')} JPY</p><ul>{lines}</ul><form method='post'>{view_fields}<input type='hidden' name='id' value='{order_id}'><label>Status <select name='status'>{options}</select></label><button>Update status</button></form></div></details>"
+                result.append((order_id, f"<tr><td>#{order_id}</td><td>{esc(order_date)}</td><td>{esc(name)}</td><td>{esc(summary)}</td><td>{esc(status)}</td><td>{details}</td></tr>"))
         for order_id, row, shop, nominal in store.imported(query):
-            def esc(value):
-                return html.escape(str(value), quote=True)
             needs_review = not shop.strip() or not valid_jpy(nominal)
-            details = "".join(f"<li><strong>{esc(key)}:</strong> {esc(row[key]) or '—'}</li>" for key in ("Date", "DN Line", "Items", "Link", "Nominal", "Arrived Date", "Status", "Box"))
-            result.append(f"<section><h2>Item {order_id} · Imported</h2><p>{'Needs review' if needs_review else 'Reviewed'} · Original sheet values are preserved below.</p><ul>{details}</ul><form method='post'><input type='hidden' name='kind' value='imported'><input type='hidden' name='id' value='{order_id}'><label>Shop <input name='shop' value='{esc(shop)}'></label><label>Price (JPY) <input name='nominal' value='{esc(nominal)}'></label><button>Save review</button></form></section>")
+            if review_only and not needs_review:
+                continue
+            details = "".join(f"<li><strong>{esc(key)}:</strong> {esc(row[key]) or '—'}</li>" for key in ("Order No.", "Date", "DN Line", "Items", "Link", "Nominal", "Arrived Date", "Status", "Box"))
+            details += "".join(f"<li><strong>{esc(column['header'] or 'Extra column')}:</strong> {esc(column['value'])}</li>" for column in row.get("Extra columns", []) if column["value"])
+            form = f"<details><summary>Details &amp; review</summary><div class='order-details'><p>Original sheet values</p><ul>{details}</ul><form method='post'>{view_fields}<input type='hidden' name='kind' value='imported'><input type='hidden' name='id' value='{order_id}'><label>Shop <input name='shop' value='{esc(shop)}'></label><label>Price (JPY) <input name='nominal' value='{esc(nominal)}'></label><button>Save review</button></form></div></details>"
+            review_text = "Needs review" if needs_review else "Reviewed"
+            result.append((order_id, f"<tr><td>#{order_id}</td><td>{esc(row['Date']) or '—'}</td><td>{esc(row['DN Line'])}</td><td>{esc(row['Items']) or '—'}</td><td><span class='review-label'>{review_text}</span><br>{esc(row['Status'])}</td><td>{form}</td></tr>"))
+        result.sort(key=lambda record: record[0], reverse=True)
         empty = "<div class='empty-state'>No matching orders yet. Try another search or add an order.</div>" if not result else ""
-        return page("<span class='eyebrow'>Track your items</span><h1>Orders</h1><p class='intro'>Find an order and update its journey.</p><form><label>Search by item ID, LINE name, or DN Line <input name='q' value='" + html.escape(query, quote=True) + "'></label><button>Search</button></form>" + "".join(result) + empty, title="Orders", active="orders")
+        search_args = "?" + urlencode({"q": query}) if query else ""
+        review_args = "?" + urlencode({"view": "review", **({"q": query} if query else {})})
+        tabs = f"<nav class='order-tabs' aria-label='Order views'><a href='/admin/orders{esc(search_args)}'{' aria-current=page' if not review_only else ''}>All orders</a><a href='/admin/orders{esc(review_args)}'{' aria-current=page' if review_only else ''}>Needs review <span class='review-count'>{review_count}</span></a></nav>"
+        search_form = f"<form class='order-search' method='get'>{'<input type=hidden name=view value=review>' if review_only else ''}<label>Search by item ID or LINE display name <input name='q' value='{esc(query)}'></label><button>Search</button></form>"
+        table = "<div class='orders-table-wrap'><table class='orders-table'><thead><tr><th>Item ID</th><th>Date</th><th>LINE name</th><th>Item</th><th>Status</th><th>Details</th></tr></thead><tbody>" + "".join(row for _, row in result) + "</tbody></table></div>" if result else ""
+        return page("<span class='eyebrow'>Track your items</span><h1>Orders</h1><p class='intro'>Find an order and update its journey.</p>" + tabs + search_form + table + empty, title="Orders", active="orders")
 
     async def shops(request: Request):
         if not valid(request):

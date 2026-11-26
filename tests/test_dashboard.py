@@ -121,6 +121,28 @@ def test_csv_preview_import_and_duplicate_protection(client):
     assert browser.post("/admin/import", data={"csv": csv_text, "confirm": "yes"}, headers=headers).status_code == 400
 
 
+def test_order_records_review_tab_and_count(client):
+    browser, _, _ = client
+    headers = {"origin": "http://testserver"}
+    csv_text = ("Date,Order No.,DN Line,Items,Link,Nominal,Arrived Date,Status,Box\n"
+                "26/2,57,Bela,Album,https://example.com/a,600,,Ordered,\n"
+                "27/2,58,Ani,Photocard,https://example.com/b,,,Ordered,\n")
+    browser.post("/login", data={"password": "correct horse"}, headers=headers)
+    browser.post("/admin/import", data={"csv": csv_text, "confirm": "yes"}, headers=headers)
+    all_orders = browser.get("/admin/orders").text
+    assert "<table class='orders-table'>" in all_orders
+    assert "Needs review <span class='review-count'>2</span>" in all_orders
+    review = browser.get("/admin/orders?view=review").text
+    assert "Album" in review and "Photocard" in review
+    update = {"kind": "imported", "id": "57", "shop": "Mercari", "nominal": "600", "view": "review"}
+    response = browser.post("/admin/orders", data=update, headers=headers, follow_redirects=False)
+    assert response.headers["location"] == "/admin/orders?view=review"
+    review = browser.get(response.headers["location"]).text
+    assert "Needs review <span class='review-count'>1</span>" in review
+    assert "Album" not in review and "Photocard" in review
+    assert "Album" in browser.get("/admin/orders").text
+
+
 def test_admin_calculator_rate_persists_and_requires_login(client):
     browser, path, credential = client
     headers = {"origin": "http://testserver"}

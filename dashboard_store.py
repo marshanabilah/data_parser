@@ -3,6 +3,7 @@
 import sqlite3
 import json
 import re
+import hashlib
 from typing import Optional, Sequence
 
 from dashboard_orders import OrderRecord, STATUSES
@@ -25,6 +26,7 @@ class DashboardStore:
                 CREATE TABLE IF NOT EXISTS dashboard_products (id INTEGER PRIMARY KEY, order_id INTEGER NOT NULL REFERENCES dashboard_orders(id), name TEXT NOT NULL, link TEXT NOT NULL, price_jpy INTEGER NOT NULL, quantity INTEGER NOT NULL);
                 CREATE TABLE IF NOT EXISTS imported_orders (id INTEGER PRIMARY KEY, original_json TEXT NOT NULL, shop TEXT NOT NULL DEFAULT '', nominal TEXT NOT NULL DEFAULT '');
                 CREATE TABLE IF NOT EXISTS dashboard_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS csv_import_batches (fingerprint TEXT PRIMARY KEY);
             """)
             db.executemany("INSERT OR IGNORE INTO shops VALUES (?, ?, NULL)", DEFAULT_SHOPS.items())
 
@@ -80,15 +82,31 @@ class DashboardStore:
     def import_orders(self, records):
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
+            fingerprint = hashlib.sha256(json.dumps(records, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+            if db.execute("SELECT 1 FROM csv_import_batches WHERE fingerprint = ?", (fingerprint,)).fetchone():
+                raise ValueError("This CSV has already been imported; no rows were added.")
+            existing = {row[0] for row in db.execute("SELECT id FROM dashboard_orders UNION SELECT id FROM imported_orders")}
+            originals = {int(row["Order No."]) for row in records}
+            maximum = max(existing | originals)
+            assigned = set(existing)
+            saved = []
             for row in records:
-                order_id = int(row["Order No."])
-                if db.execute("SELECT 1 FROM dashboard_orders WHERE id = ? UNION ALL SELECT 1 FROM imported_orders WHERE id = ?", (order_id, order_id)).fetchone():
-                    raise ValueError(f"Item ID {order_id} already exists; no rows were imported.")
-            db.executemany("INSERT INTO imported_orders (id, original_json, nominal) VALUES (?, ?, ?)", [(int(row["Order No."]), json.dumps(row, ensure_ascii=False), row["Nominal"]) for row in records])
+                original_id = int(row["Order No."])
+                order_id = original_id
+                if order_id in assigned:
+                    maximum += 1
+                    if maximum > 9223372036854775807:
+                        raise ValueError("No available item IDs; no rows were imported.")
+                    order_id = maximum
+                assigned.add(order_id)
+                saved.append((order_id, json.dumps(row, ensure_ascii=False), row["Nominal"]))
+            db.executemany("INSERT INTO imported_orders (id, original_json, nominal) VALUES (?, ?, ?)", saved)
+            db.execute("INSERT INTO csv_import_batches VALUES (?)", (fingerprint,))
             # Reserve imported IDs so future dashboard-created IDs cannot collide.
-            maximum = max(int(row["Order No."]) for row in records)
+            maximum = max(assigned)
             db.execute("INSERT INTO sqlite_sequence (name, seq) SELECT 'dashboard_orders', ? WHERE NOT EXISTS (SELECT 1 FROM sqlite_sequence WHERE name = 'dashboard_orders')", (maximum,))
             db.execute("UPDATE sqlite_sequence SET seq = max(seq, ?) WHERE name = 'dashboard_orders'", (maximum,))
+            return [item[0] for item in saved]
 
     def imported(self, query=""):
         with self.connect() as db:
