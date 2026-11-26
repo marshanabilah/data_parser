@@ -2,11 +2,16 @@
 
 import sqlite3
 import json
+import re
 from typing import Optional, Sequence
 
 from dashboard_orders import OrderRecord, STATUSES
 
 DEFAULT_SHOPS = {"Mercari": False, "Rakuten": False, "Fril": False, "UMS": True, "Lashinbang": True, "Weverse": True}
+
+
+def valid_jpy(value):
+    return bool(re.fullmatch(r"\s*(?:¥|￥|JPY\s*)?\d[\d,]*(?:\s*円)?\s*", value, re.IGNORECASE))
 
 
 class DashboardStore:
@@ -86,6 +91,8 @@ class DashboardStore:
     def update_imported(self, order_id, shop, nominal):
         if len(shop) > 100 or len(nominal) > 100:
             raise ValueError("Shop or price is too long")
+        if nominal.strip() and not valid_jpy(nominal):
+            raise ValueError("Price must be a whole-yen amount or blank")
         with self.connect() as db:
             return db.execute("UPDATE imported_orders SET shop = ?, nominal = ? WHERE id = ?", (shop.strip(), nominal.strip(), order_id)).rowcount == 1
 

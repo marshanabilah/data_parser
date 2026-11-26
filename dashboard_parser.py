@@ -9,10 +9,11 @@ from order_parser import OrderParseError, parse_order_message
 
 
 class DashboardInterpreter:
-    def __init__(self, api_key, client=None):
+    def __init__(self, api_key, client=None, display_name=None):
         self.api_key = api_key
         self.client = client
         self.shop = None
+        self.display_name = display_name
 
     def interpret(self, message, indexed_links):
         system = ("Interpret this jastip order collection. Return only JSON: an object with "
@@ -40,7 +41,11 @@ class DashboardInterpreter:
             if shop is not None and (not isinstance(shop, str) or len(shop.strip()) > 100):
                 raise ValueError
             self.shop = shop.strip() if shop and shop.strip() else None
-            return json.dumps(data["links"])
+            links = data["links"]
+            if self.display_name is not None:
+                for link in links:
+                    link["dn_line"] = self.display_name
+            return json.dumps(links)
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 429:
                 raise OrderParseError("OpenRouter's free request limit was reached. Try again later.") from exc
@@ -51,7 +56,7 @@ class DashboardInterpreter:
             raise OrderParseError("Could not interpret the order collection") from exc
 
 
-def parse_dashboard_order(message, api_key, transport=None):
-    interpreter = DashboardInterpreter(api_key, transport)
+def parse_dashboard_order(message, api_key, transport=None, display_name=None):
+    interpreter = DashboardInterpreter(api_key, transport, display_name)
     links = parse_order_message(message, interpreter)
     return interpreter.shop, links

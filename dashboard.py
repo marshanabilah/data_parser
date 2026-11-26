@@ -13,13 +13,14 @@ from urllib.parse import parse_qs
 from zoneinfo import ZoneInfo
 
 import httpx
+from csv_orders import parse_csv_orders
 
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, RedirectResponse
 from starlette.routing import Route
 
-from dashboard_store import DashboardStore
+from dashboard_store import DashboardStore, valid_jpy
 from dashboard_orders import OrderRecord, ProductLine, STATUSES
 from dashboard_parser import parse_dashboard_order
 from dashboard_ui import page
@@ -88,7 +89,7 @@ def create_app(db_path: str, credential: str, secret: str, secure: bool = True) 
     async def admin(request: Request):
         if not valid(request):
             return RedirectResponse("/login", status_code=303)
-        count = len(store.search())
+        count = len(store.search()) + len(store.imported())
         content = f"<span class='eyebrow'>Your workspace</span><h1>Good to see you.</h1><p class='intro'>A little home for all your jastip orders, from purchase to delivery.</p><div class='banner'><div><span class='eyebrow'>Ready when you are</span><h2>Let's get your orders organised.</h2><p>Paste an order collection and check the details before saving.</p></div><a class='button' href='/admin/intake'>Parse an order</a></div><div class='section-title'><div><span class='eyebrow'>At a glance</span><h2>Your order desk</h2></div><span class='hint'>{count} saved {'record' if count == 1 else 'records'}</span></div><div class='actions'><a class='action-card' href='/admin/orders'><span class='tag'>Track &amp; update</span><h2>Orders</h2><p>Find an item and follow its journey from Japan to Indonesia.</p><span class='go'>View orders →</span></a><a class='action-card' href='/admin/shops'><span class='tag'>Your preferences</span><h2>Shop settings</h2><p>Set link rules and suggested shipping fees for each shop.</p><span class='go'>Manage shops →</span></a></div><form action='/logout' method='post'><button>Sign out</button></form>"
         return page(content, title="Overview", active="overview")
 
@@ -113,7 +114,7 @@ def create_app(db_path: str, credential: str, secret: str, secure: bool = True) 
             key = os.environ.get("OPENROUTER_API_KEY", "").strip()
             if not line_name or not message or not key:
                 raise ValueError("LINE name, order text, and OPENROUTER_API_KEY are required.")
-            shop, parsed = await asyncio.to_thread(parse_dashboard_order, message, key)
+            shop, parsed = await asyncio.to_thread(parse_dashboard_order, message, key, display_name=line_name)
             settings = next((row for row in store.shops() if shop and row[0].casefold() == shop.casefold()), None)
             if settings:
                 shop = settings[0]
@@ -142,7 +143,7 @@ def create_app(db_path: str, credential: str, secret: str, secure: bool = True) 
             fields += f"<label>Shipping per record (JPY) <input name='shipping' type='number' min='0' value='{fee}'></label>"
             for item, name, yen in details:
                 warning = "<p>This link already exists in an order.</p>" if store.has_link(item.link) else ""
-                fields += f"<fieldset><legend>Product</legend>{warning}<label>DN Line <input name='dn' value='{esc(item.dn_line)}' required></label><label>Link <input name='link' value='{esc(item.link)}' readonly></label><label>Name <input name='name' value='{esc(name)}' required></label><label>Price (JPY) <input name='price' type='number' min='0' value='{esc(yen)}' required></label><label>Quantity <input name='quantity' type='number' min='1' value='1' required></label></fieldset>"
+                fields += f"<fieldset><legend>Product</legend>{warning}<label>Link <input name='link' value='{esc(item.link)}' readonly></label><label>Name <input name='name' value='{esc(name)}' required></label><label>Price (JPY) <input name='price' type='number' min='0' value='{esc(yen)}' required></label><label>Quantity <input name='quantity' type='number' min='1' value='1' required></label></fieldset>"
             return page("<span class='eyebrow'>Almost there</span><h1>Review your order.</h1><p class='intro'>Check the details before saving.</p><form method='post' action='/admin/confirm'>" + fields + "<button>Confirm and save</button></form><a href='/admin/intake'>Cancel</a>", title="Review order", active="intake")
         except (ValueError, OrderParseError) as exc:
             return page("<h1>Could not parse this order.</h1><p>" + html.escape(str(exc)) + "</p><a href='/admin/intake'>Try again</a>", title="Parsing problem", active="intake", status_code=400)
@@ -165,8 +166,9 @@ def create_app(db_path: str, credential: str, secret: str, secure: bool = True) 
             if setting:
                 shop = setting[0]
             multiple = rule == "1"
-            names, links, dns, prices, quantities = (form[key] for key in ("name", "link", "dn", "price", "quantity"))
-            if not names or len(names) > 20 or len({len(names), len(links), len(dns), len(prices), len(quantities)}) != 1:
+            names, links, prices, quantities = (form[key] for key in ("name", "link", "price", "quantity"))
+            dns = [one("line_name")] * len(names)
+            if not names or len(names) > 20 or len({len(names), len(links), len(prices), len(quantities)}) != 1:
                 raise ValueError("Invalid product fields")
             products = [ProductLine(name, link, int(price), int(qty)) for name, link, price, qty in zip(names, links, prices, quantities)]
             if multiple and len(set(dns)) != 1:
@@ -179,6 +181,28 @@ def create_app(db_path: str, credential: str, secret: str, secure: bool = True) 
         except (ValueError, KeyError, StopIteration, OverflowError):
             return HTMLResponse("Invalid order. Return to the preview and check all fields.", status_code=400)
 
+    async def import_csv(request: Request):
+        if not valid(request):
+            return RedirectResponse("/login", status_code=303)
+        if request.method == "GET":
+            return page("<span class='eyebrow'>From Google Sheets</span><h1>Import orders</h1><p class='intro'>Choose an exported CSV or paste its contents. You'll review the rows before saving. Imports stay on this server and do not use AI.</p><form method='post'><label>CSV file <input type='file' accept='.csv,text/csv' id='csv-file'></label><label>CSV contents <textarea name='csv' id='csv-content' required></textarea></label><button>Review CSV</button></form><script>document.getElementById('csv-file').addEventListener('change', async function () { if (this.files[0]) document.getElementById('csv-content').value = await this.files[0].text(); });</script>", title="Import CSV", active="import")
+        if not csrf(request):
+            return HTMLResponse("Invalid request", status_code=403)
+        try:
+            form = await get_form(request)
+            source = form.get("csv", [""])[0]
+            records = parse_csv_orders(source)
+            if form.get("confirm", [""])[0] == "yes":
+                store.import_orders(records)
+                return page(f"<h1>Import complete.</h1><p>{len(records)} orders saved. Imported orders need review because their shop is not in the CSV.</p><a class='button' href='/admin/orders'>View orders</a>", title="Import complete", active="orders")
+            def esc(value):
+                return html.escape(str(value), quote=True)
+            rows = "".join(f"<tr><td>{esc(r['Order No.'])}</td><td>{esc(r['DN Line'])}</td><td>{esc(r['Items'])}</td><td>{esc(r['Nominal']) if r['Nominal'].strip() else 'Needs review'}</td><td>{esc(r['Status'])}</td></tr>" for r in records)
+            body = "<h1>Review CSV</h1><p>All rows will need review because the shop is missing. Blank prices also need review. Existing item IDs will stop the import; no rows will be saved.</p><div class='shop-table-wrap'><table class='shop-table'><thead><tr><th>Item ID</th><th>LINE name</th><th>Item</th><th>Price (JPY)</th><th>Original status</th></tr></thead><tbody>" + rows + "</tbody></table></div><form method='post'><input type='hidden' name='confirm' value='yes'><input type='hidden' name='csv' value='" + esc(source) + "'><button>Confirm import</button></form><a href='/admin/import'>Cancel</a>"
+            return page(body, title="Review CSV", active="import")
+        except ValueError as exc:
+            return page("<h1>Could not import CSV</h1><p>" + html.escape(str(exc)) + "</p><a href='/admin/import'>Try again</a>", title="Import problem", active="import", status_code=400)
+
     async def orders(request: Request):
         if not valid(request):
             return RedirectResponse("/login", status_code=303)
@@ -187,7 +211,11 @@ def create_app(db_path: str, credential: str, secret: str, secure: bool = True) 
                 return HTMLResponse("Invalid request", status_code=403)
             try:
                 form = await get_form(request)
-                if not store.set_status(int(form["id"][0]), form["status"][0]):
+                if form.get("kind", [""])[0] == "imported":
+                    updated = store.update_imported(int(form["id"][0]), form["shop"][0], form["nominal"][0])
+                else:
+                    updated = store.set_status(int(form["id"][0]), form["status"][0])
+                if not updated:
                     raise ValueError("Unknown order")
             except (ValueError, KeyError):
                 return HTMLResponse("Invalid status update", status_code=400)
@@ -200,6 +228,12 @@ def create_app(db_path: str, credential: str, secret: str, secure: bool = True) 
             lines = "".join(f"<li>{escape(title)} — ¥{price} × {quantity} <a href='{html.escape(link, quote=True)}' rel='noreferrer'>Product</a></li>" for title, link, price, quantity in store.products(order_id))
             options = "".join(f"<option{' selected' if state == status else ''}>{escape(state)}</option>" for state in STATUSES)
             result.append(f"<section><h2>Item {order_id} — {escape(shop)}</h2><p>{escape(order_date)} · {escape(name)} · {escape(dn)} · Shipping: {escape(shipping if shipping is not None else 'not set')} JPY</p><ul>{lines}</ul><form method='post'><input type='hidden' name='id' value='{order_id}'><label>Status <select name='status'>{options}</select></label><button>Update</button></form></section>")
+        for order_id, row, shop, nominal in store.imported(query):
+            def esc(value):
+                return html.escape(str(value), quote=True)
+            needs_review = not shop.strip() or not valid_jpy(nominal)
+            details = "".join(f"<li><strong>{esc(key)}:</strong> {esc(row[key]) or '—'}</li>" for key in ("Date", "DN Line", "Items", "Link", "Nominal", "Arrived Date", "Status", "Box"))
+            result.append(f"<section><h2>Item {order_id} · Imported</h2><p>{'Needs review' if needs_review else 'Reviewed'} · Original sheet values are preserved below.</p><ul>{details}</ul><form method='post'><input type='hidden' name='kind' value='imported'><input type='hidden' name='id' value='{order_id}'><label>Shop <input name='shop' value='{esc(shop)}'></label><label>Price (JPY) <input name='nominal' value='{esc(nominal)}'></label><button>Save review</button></form></section>")
         empty = "<div class='empty-state'>No matching orders yet. Try another search or add an order.</div>" if not result else ""
         return page("<span class='eyebrow'>Track your items</span><h1>Orders</h1><p class='intro'>Find an order and update its journey.</p><form><label>Search by item ID, LINE name, or DN Line <input name='q' value='" + html.escape(query, quote=True) + "'></label><button>Search</button></form>" + "".join(result) + empty, title="Orders", active="orders")
 
@@ -244,7 +278,7 @@ def create_app(db_path: str, credential: str, secret: str, secure: bool = True) 
         response.delete_cookie("admin_session", secure=secure, httponly=True, samesite="strict")
         return response
 
-    return Starlette(routes=[Route("/", public), Route("/login", login, methods=["GET", "POST"]), Route("/admin", admin), Route("/admin/shops", shops, methods=["GET", "POST"]), Route("/admin/intake", intake, methods=["GET", "POST"]), Route("/admin/confirm", confirm, methods=["POST"]), Route("/admin/orders", orders, methods=["GET", "POST"]), Route("/logout", logout, methods=["POST"])])
+    return Starlette(routes=[Route("/", public), Route("/login", login, methods=["GET", "POST"]), Route("/admin", admin), Route("/admin/shops", shops, methods=["GET", "POST"]), Route("/admin/intake", intake, methods=["GET", "POST"]), Route("/admin/import", import_csv, methods=["GET", "POST"]), Route("/admin/confirm", confirm, methods=["POST"]), Route("/admin/orders", orders, methods=["GET", "POST"]), Route("/logout", logout, methods=["POST"])])
 
 
 def app_factory() -> Starlette:

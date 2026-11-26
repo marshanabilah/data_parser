@@ -67,7 +67,7 @@ def test_confirm_search_and_status(client):
     saved = browser.post("/admin/confirm", data=payload, headers={"origin": "http://testserver"})
     assert "Item IDs: 1" in saved.text
     assert "Item IDs: 1" in browser.post("/admin/confirm", data=payload, headers={"origin": "http://testserver"}).text
-    assert "Bela" in browser.get("/admin/orders?q=DN1").text
+    assert "Bela" in browser.get("/admin/orders?q=Bela").text
     browser.post("/admin/orders", data={"id": "1", "status": "Completed"}, headers={"origin": "http://testserver"})
     assert "selected>Completed" in browser.get("/admin/orders").text
 
@@ -78,7 +78,7 @@ def test_intake_parses_preview_and_requires_price(client, monkeypatch):
 
     browser, _, _ = client
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
-    monkeypatch.setattr(dashboard, "parse_dashboard_order", lambda *args: ("UMS", (SubmittedLink(dn_line="DN1", link="https://example.com/a"),)))
+    monkeypatch.setattr(dashboard, "parse_dashboard_order", lambda *args, **kwargs: ("UMS", (SubmittedLink(dn_line="DN1", link="https://example.com/a"),)))
 
     async def extract(_self, _link):
         return ExtractedProduct(items="Album", nominal=None)
@@ -103,3 +103,19 @@ def test_new_shop_is_saved_with_confirmed_order(client):
     shops = browser.get("/admin/shops").text
     assert "New Shop" in shops
     assert "<table class='shop-table'>" in shops
+
+
+def test_csv_preview_import_and_duplicate_protection(client):
+    browser, _, _ = client
+    csv_text = "Date,Order No.,DN Line,Items,Link,Nominal,Arrived Date,Status,Box\n2026-10-16,57,Bela,Album,https://example.com/a,,,Ordered,Box 1\n"
+    headers = {"origin": "http://testserver"}
+    assert browser.get("/admin/import", follow_redirects=False).status_code == 303
+    browser.post("/login", data={"password": "correct horse"}, headers=headers)
+    preview = browser.post("/admin/import", data={"csv": csv_text}, headers=headers)
+    assert preview.status_code == 200
+    assert "Needs review" in preview.text
+    assert "Bela" not in browser.get("/admin/orders").text
+    saved = browser.post("/admin/import", data={"csv": csv_text, "confirm": "yes"}, headers=headers)
+    assert "1 orders saved" in saved.text
+    assert "Box 1" in browser.get("/admin/orders?q=Bela").text
+    assert browser.post("/admin/import", data={"csv": csv_text, "confirm": "yes"}, headers=headers).status_code == 400
