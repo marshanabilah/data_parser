@@ -143,6 +143,19 @@ def test_order_records_review_tab_and_count(client):
     assert "Album" in browser.get("/admin/orders").text
 
 
+def test_known_shop_without_price_is_not_in_shop_review(client):
+    browser, _, _ = client
+    headers = {"origin": "http://testserver"}
+    csv_text = ("Date,Order No.,DN Line,Items,Link,Nominal,Arrived Date,Status,Box\n"
+                "26/2,77,Bela,Album,https://jp.mercari.com/item/a,,,Ordered,\n")
+    browser.post("/login", data={"password": "correct horse"}, headers=headers)
+    browser.post("/admin/import", data={"csv": csv_text, "confirm": "yes"}, headers=headers)
+    orders = browser.get("/admin/orders").text
+    assert "Needs review <span class='review-count'>0</span>" in orders
+    assert "Price missing or invalid" in orders
+    assert "value='Mercari'" in orders
+
+
 def test_admin_calculator_rate_persists_and_requires_login(client):
     browser, path, credential = client
     headers = {"origin": "http://testserver"}

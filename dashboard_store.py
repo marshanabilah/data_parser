@@ -5,10 +5,12 @@ import json
 import re
 import hashlib
 from typing import Optional, Sequence
+from urllib.parse import urlsplit
 
 from dashboard_orders import OrderRecord, STATUSES
 
 DEFAULT_SHOPS = {"Mercari": False, "Rakuten": False, "Fril": False, "UMS": True, "Lashinbang": True, "Weverse": True}
+DEFAULT_DOMAINS = {"mercari.com": "Mercari", "rakuten.co.jp": "Rakuten", "fril.jp": "Fril", "lashinbang.com": "Lashinbang"}
 
 
 def valid_jpy(value):
@@ -27,8 +29,13 @@ class DashboardStore:
                 CREATE TABLE IF NOT EXISTS imported_orders (id INTEGER PRIMARY KEY, original_json TEXT NOT NULL, shop TEXT NOT NULL DEFAULT '', nominal TEXT NOT NULL DEFAULT '');
                 CREATE TABLE IF NOT EXISTS dashboard_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS csv_import_batches (fingerprint TEXT PRIMARY KEY);
+                CREATE TABLE IF NOT EXISTS shop_domains (domain TEXT PRIMARY KEY COLLATE NOCASE, shop TEXT NOT NULL REFERENCES shops(name));
             """)
             db.executemany("INSERT OR IGNORE INTO shops VALUES (?, ?, NULL)", DEFAULT_SHOPS.items())
+            if not db.execute("SELECT 1 FROM dashboard_settings WHERE key = 'shop_domains_initialized'").fetchone():
+                db.executemany("INSERT OR IGNORE INTO shop_domains VALUES (?, ?)", DEFAULT_DOMAINS.items())
+                db.execute("INSERT INTO dashboard_settings VALUES ('shop_domains_initialized', '1')")
+            self._fill_missing_shops(db)
 
     def connect(self):
         db = sqlite3.connect(self.path, timeout=10)
@@ -38,6 +45,48 @@ class DashboardStore:
     def shops(self):
         with self.connect() as db:
             return db.execute("SELECT name, allows_multiple, shipping_jpy FROM shops ORDER BY name").fetchall()
+
+    def shop_domains(self):
+        with self.connect() as db:
+            return db.execute("SELECT domain, shop FROM shop_domains ORDER BY domain").fetchall()
+
+    @staticmethod
+    def _matching_shop(link, domains):
+        try:
+            url = urlsplit(link.strip())
+            if url.scheme.lower() != "https" or url.username is not None or url.password is not None:
+                return None
+            host = (url.hostname or "").lower().rstrip(".")
+        except ValueError:
+            return None
+        matches = [(domain, shop) for domain, shop in domains if host == domain or host.endswith("." + domain)]
+        return max(matches, key=lambda item: len(item[0]))[1] if matches else None
+
+    def _fill_missing_shops(self, db):
+        domains = db.execute("SELECT domain, shop FROM shop_domains").fetchall()
+        rows = db.execute("SELECT id, original_json FROM imported_orders WHERE trim(shop) = ''").fetchall()
+        for order_id, raw in rows:
+            shop = self._matching_shop(json.loads(raw).get("Link", ""), domains)
+            if shop:
+                db.execute("UPDATE imported_orders SET shop = ? WHERE id = ? AND trim(shop) = ''", (shop, order_id))
+
+    def _set_shop_domains(self, db, name, domains):
+        normalized = []
+        for domain in domains:
+            domain = domain.strip().lower().rstrip(".")
+            if not domain:
+                continue
+            if len(domain) > 253 or not re.fullmatch(r"(?=.{1,253}\Z)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}", domain):
+                raise ValueError("Enter website domains such as example.com, without https:// or paths.")
+            normalized.append(domain)
+        if len(normalized) != len(set(normalized)):
+            raise ValueError("A domain can only be listed once.")
+        for domain in normalized:
+            existing = db.execute("SELECT shop FROM shop_domains WHERE domain = ?", (domain,)).fetchone()
+            if existing and existing[0].casefold() != name.casefold():
+                raise ValueError("A website domain is already assigned to another shop.")
+        db.execute("DELETE FROM shop_domains WHERE shop = ? COLLATE NOCASE", (name,))
+        db.executemany("INSERT INTO shop_domains (domain, shop) VALUES (?, ?)", [(domain, name) for domain in normalized])
 
     def exchange_rate(self):
         with self.connect() as db:
@@ -50,11 +99,14 @@ class DashboardStore:
         with self.connect() as db:
             db.execute("INSERT INTO dashboard_settings VALUES ('jpy_idr_rate', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", (value,))
 
-    def set_shop(self, name: str, allows_multiple: bool, shipping_jpy: Optional[int]):
+    def set_shop(self, name: str, allows_multiple: bool, shipping_jpy: Optional[int], domains=None):
         if not name.strip() or type(allows_multiple) is not bool or (shipping_jpy is not None and (type(shipping_jpy) is not int or shipping_jpy < 0)):
             raise ValueError("Invalid shop settings")
         with self.connect() as db:
             db.execute("INSERT INTO shops VALUES (?, ?, ?) ON CONFLICT(name) DO UPDATE SET allows_multiple=excluded.allows_multiple, shipping_jpy=excluded.shipping_jpy", (name.strip(), allows_multiple, shipping_jpy))
+            if domains is not None:
+                self._set_shop_domains(db, name.strip(), domains)
+                self._fill_missing_shops(db)
 
     def save(self, token: str, records: Sequence[OrderRecord], new_shop=None):
         if not token or len(token) > 200 or not records:
@@ -101,6 +153,7 @@ class DashboardStore:
                 assigned.add(order_id)
                 saved.append((order_id, json.dumps(row, ensure_ascii=False), row["Nominal"]))
             db.executemany("INSERT INTO imported_orders (id, original_json, nominal) VALUES (?, ?, ?)", saved)
+            self._fill_missing_shops(db)
             db.execute("INSERT INTO csv_import_batches VALUES (?)", (fingerprint,))
             # Reserve imported IDs so future dashboard-created IDs cannot collide.
             maximum = max(assigned)

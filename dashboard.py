@@ -257,11 +257,11 @@ def create_app(db_path: str, credential: str, secret: str, secure: bool = True) 
             if form.get("confirm", [""])[0] == "yes":
                 ids = store.import_orders(records)
                 renumbered = sum(order_id != int(row["Order No."]) for order_id, row in zip(ids, records))
-                return page(f"<h1>Import complete.</h1><p>{len(records)} orders saved; {renumbered} received a new item ID. Original order numbers remain in each record. Imported orders need review because their shop is not in the CSV.</p><a class='button' href='/admin/orders'>View orders</a>", title="Import complete", active="orders")
+                return page(f"<h1>Import complete.</h1><p>{len(records)} orders saved; {renumbered} received a new item ID. Original order numbers remain in each record. Known shops are identified from product links; unknown shops need review.</p><a class='button' href='/admin/orders'>View orders</a>", title="Import complete", active="orders")
             def esc(value):
                 return html.escape(str(value), quote=True)
             rows = "".join(f"<tr><td>{esc(r['Order No.'])}</td><td>{esc(r['DN Line'])}</td><td>{esc(r['Items'])}</td><td>{esc(r['Nominal']) if r['Nominal'].strip() else 'Needs review'}</td><td>{esc(r['Status'])}</td></tr>" for r in records)
-            body = "<h1>Review CSV</h1><p>Each row becomes a separate order. Repeated or existing order numbers receive new item IDs; the original numbers stay available for reference. Dates are kept exactly as provided without adding a year. All rows will need review because the shop is missing; blank prices also need review.</p><div class='shop-table-wrap'><table class='shop-table'><thead><tr><th>Original order number</th><th>LINE name</th><th>Item</th><th>Price (JPY)</th><th>Original status</th></tr></thead><tbody>" + rows + "</tbody></table></div><form method='post'><input type='hidden' name='confirm' value='yes'><input type='hidden' name='csv' value='" + esc(source) + "'><button>Confirm import</button></form><a href='/admin/import'>Cancel</a>"
+            body = "<h1>Review CSV</h1><p>Each row becomes a separate order. Repeated or existing order numbers receive new item IDs; the original numbers stay available for reference. Dates are kept exactly as provided without adding a year. Known shops are matched from links on import; unknown shops need review. Blank prices remain visible.</p><div class='shop-table-wrap'><table class='shop-table'><thead><tr><th>Original order number</th><th>LINE name</th><th>Item</th><th>Price (JPY)</th><th>Original status</th></tr></thead><tbody>" + rows + "</tbody></table></div><form method='post'><input type='hidden' name='confirm' value='yes'><input type='hidden' name='csv' value='" + esc(source) + "'><button>Confirm import</button></form><a href='/admin/import'>Cancel</a>"
             return page(body, title="Review CSV", active="import")
         except ValueError as exc:
             return page("<h1>Could not import CSV</h1><p>" + html.escape(str(exc)) + "</p><a href='/admin/import'>Try again</a>", title="Import problem", active="import", status_code=400)
@@ -291,7 +291,8 @@ def create_app(db_path: str, credential: str, secret: str, secure: bool = True) 
         query = request.query_params.get("q", "")[:200]
         review_only = request.query_params.get("view") == "review"
         imported = store.imported()
-        review_count = sum(not shop.strip() or not valid_jpy(nominal) for _, _, shop, nominal in imported)
+        known_shops = {name.casefold() for name, _, _ in store.shops()}
+        review_count = sum(shop.strip().casefold() not in known_shops for _, _, shop, _ in imported)
         result = []
         def esc(value):
             return html.escape(str(value), quote=True)
@@ -305,14 +306,16 @@ def create_app(db_path: str, credential: str, secret: str, secure: bool = True) 
                 details = f"<details><summary>Details &amp; update</summary><div class='order-details'><p>Shop: {esc(shop)} · Shipping: {esc(shipping if shipping is not None else 'not set')} JPY</p><ul>{lines}</ul><form method='post'>{view_fields}<input type='hidden' name='id' value='{order_id}'><label>Status <select name='status'>{options}</select></label><button>Update status</button></form></div></details>"
                 result.append((order_id, f"<tr><td>#{order_id}</td><td>{esc(order_date)}</td><td>{esc(name)}</td><td>{esc(summary)}</td><td>{esc(status)}</td><td>{details}</td></tr>"))
         for order_id, row, shop, nominal in store.imported(query):
-            needs_review = not shop.strip() or not valid_jpy(nominal)
+            needs_review = shop.strip().casefold() not in known_shops
             if review_only and not needs_review:
                 continue
             details = "".join(f"<li><strong>{esc(key)}:</strong> {esc(row[key]) or '—'}</li>" for key in ("Order No.", "Date", "DN Line", "Items", "Link", "Nominal", "Arrived Date", "Status", "Box"))
             details += "".join(f"<li><strong>{esc(column['header'] or 'Extra column')}:</strong> {esc(column['value'])}</li>" for column in row.get("Extra columns", []) if column["value"])
-            form = f"<details><summary>Details &amp; review</summary><div class='order-details'><p>Original sheet values</p><ul>{details}</ul><form method='post'>{view_fields}<input type='hidden' name='kind' value='imported'><input type='hidden' name='id' value='{order_id}'><label>Shop <input name='shop' value='{esc(shop)}'></label><label>Price (JPY) <input name='nominal' value='{esc(nominal)}'></label><button>Save review</button></form></div></details>"
-            review_text = "Needs review" if needs_review else "Reviewed"
-            result.append((order_id, f"<tr><td>#{order_id}</td><td>{esc(row['Date']) or '—'}</td><td>{esc(row['DN Line'])}</td><td>{esc(row['Items']) or '—'}</td><td><span class='review-label'>{review_text}</span><br>{esc(row['Status'])}</td><td>{form}</td></tr>"))
+            price_note = "<p>Price missing or invalid.</p>" if not valid_jpy(nominal) else ""
+            form = f"<details><summary>Details &amp; review</summary><div class='order-details'><p>Original sheet values</p><ul>{details}</ul>{price_note}<form method='post'>{view_fields}<input type='hidden' name='kind' value='imported'><input type='hidden' name='id' value='{order_id}'><label>Shop <input name='shop' value='{esc(shop)}' list='known-shops'></label><label>Price (JPY) <input name='nominal' value='{esc(nominal)}'></label><button>Save review</button></form></div></details>"
+            review_text = "Needs review" if needs_review else "Shop known"
+            price_flag = "<br><small>Price missing or invalid</small>" if not valid_jpy(nominal) else ""
+            result.append((order_id, f"<tr><td>#{order_id}</td><td>{esc(row['Date']) or '—'}</td><td>{esc(row['DN Line'])}</td><td>{esc(row['Items']) or '—'}</td><td><span class='review-label'>{review_text}</span><br>{esc(row['Status'])}{price_flag}</td><td>{form}</td></tr>"))
         result.sort(key=lambda record: record[0], reverse=True)
         empty = "<div class='empty-state'>No matching orders yet. Try another search or add an order.</div>" if not result else ""
         search_args = "?" + urlencode({"q": query}) if query else ""
@@ -320,7 +323,8 @@ def create_app(db_path: str, credential: str, secret: str, secure: bool = True) 
         tabs = f"<nav class='order-tabs' aria-label='Order views'><a href='/admin/orders{esc(search_args)}'{' aria-current=page' if not review_only else ''}>All orders</a><a href='/admin/orders{esc(review_args)}'{' aria-current=page' if review_only else ''}>Needs review <span class='review-count'>{review_count}</span></a></nav>"
         search_form = f"<form class='order-search' method='get'>{'<input type=hidden name=view value=review>' if review_only else ''}<label>Search by item ID or LINE display name <input name='q' value='{esc(query)}'></label><button>Search</button></form>"
         table = "<div class='orders-table-wrap'><table class='orders-table'><thead><tr><th>Item ID</th><th>Date</th><th>LINE name</th><th>Item</th><th>Status</th><th>Details</th></tr></thead><tbody>" + "".join(row for _, row in result) + "</tbody></table></div>" if result else ""
-        return page("<span class='eyebrow'>Track your items</span><h1>Orders</h1><p class='intro'>Find an order and update its journey.</p>" + tabs + search_form + table + empty, title="Orders", active="orders")
+        shop_options = "".join(f"<option value='{esc(name)}'></option>" for name, _, _ in store.shops())
+        return page("<span class='eyebrow'>Track your items</span><h1>Orders</h1><p class='intro'>Find an order and update its journey. Needs review shows shops not yet in your shop settings.</p>" + tabs + search_form + table + empty + f"<datalist id='known-shops'>{shop_options}</datalist>", title="Orders", active="orders")
 
     async def shops(request: Request):
         if not valid(request):
@@ -337,21 +341,24 @@ def create_app(db_path: str, credential: str, secret: str, secure: bool = True) 
             name = fields.get("name", [""])[0].strip()
             fee = fields.get("shipping_jpy", [""])[0].strip()
             rule = fields.get("allows_multiple", [""])[0]
+            domains = fields.get("domains", [""])[0].split(",")
             if len(name) > 100 or rule not in ("0", "1") or (fee and (not fee.isascii() or not fee.isdigit() or len(fee) > 9)):
                 return HTMLResponse("Invalid shop settings", status_code=400)
             try:
-                store.set_shop(name, rule == "1", int(fee) if fee else None)
-            except ValueError:
-                return HTMLResponse("Invalid shop settings", status_code=400)
+                store.set_shop(name, rule == "1", int(fee) if fee else None, domains=domains if "domains" in fields else None)
+            except ValueError as exc:
+                return page(f"<h1>Could not save shop</h1><p>{html.escape(str(exc))}</p><a href='/admin/shops'>Back to shop settings</a>", title="Shop settings", active="shops", status_code=400)
             return RedirectResponse("/admin/shops", status_code=303)
         rows = []
+        all_domains = store.shop_domains()
         for index, (name, multiple, fee) in enumerate(store.shops()):
             safe_name = html.escape(name, quote=True)
             selected_single = " selected" if not multiple else ""
             selected_multi = " selected" if multiple else ""
             value = "" if fee is None else str(fee)
-            rows.append(f"<tr><td data-label='Shop'><strong>{safe_name}</strong><form id='shop-{index}' method='post'></form><input form='shop-{index}' type='hidden' name='name' value='{safe_name}'></td><td data-label='Links per order'><select form='shop-{index}' name='allows_multiple' aria-label='Links per order for {safe_name}'><option value='0'{selected_single}>One link</option><option value='1'{selected_multi}>Multiple links</option></select></td><td data-label='Suggested shipping (JPY)'><input form='shop-{index}' type='number' min='0' name='shipping_jpy' value='{value}' aria-label='Suggested shipping in JPY for {safe_name}' placeholder='Not set'></td><td><button form='shop-{index}' class='save-row'>Save<span class='sr-only'> {safe_name}</span></button></td></tr>")
-        return page("<span class='eyebrow'>Your preferences</span><h1>Shop settings</h1><p class='intro'>Choose how many links each shop allows and set an optional suggested shipping fee.</p><h2>Add a shop</h2><form method='post' class='add-shop-form'><label>Shop <input name='name' required></label> <label>Links <select name='allows_multiple'><option value='0'>One link</option><option value='1'>Multiple links</option></select></label> <label>Suggested shipping (JPY) <input type='number' min='0' name='shipping_jpy'></label> <button>Add shop</button></form><h2 class='add-shop-heading'>Saved shops</h2><div class='shop-table-wrap'><table class='shop-table'><thead><tr><th>Shop</th><th>Links per order</th><th>Suggested shipping (JPY)</th><th><span class='sr-only'>Actions</span></th></tr></thead><tbody>" + "".join(rows) + "</tbody></table></div>", title="Shop settings", active="shops")
+            domains = html.escape(", ".join(domain for domain, owner in all_domains if owner.casefold() == name.casefold()), quote=True)
+            rows.append(f"<tr><td data-label='Shop'><strong>{safe_name}</strong><form id='shop-{index}' method='post'></form><input form='shop-{index}' type='hidden' name='name' value='{safe_name}'></td><td data-label='Links per order'><select form='shop-{index}' name='allows_multiple' aria-label='Links per order for {safe_name}'><option value='0'{selected_single}>One link</option><option value='1'{selected_multi}>Multiple links</option></select></td><td data-label='Suggested shipping (JPY)'><input form='shop-{index}' type='number' min='0' name='shipping_jpy' value='{value}' aria-label='Suggested shipping in JPY for {safe_name}' placeholder='Not set'></td><td data-label='Website domains'><input form='shop-{index}' name='domains' value='{domains}' aria-label='Website domains for {safe_name}' placeholder='example.com'></td><td><button form='shop-{index}' class='save-row'>Save<span class='sr-only'> {safe_name}</span></button></td></tr>")
+        return page("<span class='eyebrow'>Your preferences</span><h1>Shop settings</h1><p class='intro'>Set link rules, shipping suggestions, and website domains. Separate multiple domains with commas, without https:// or paths. Adding a domain also matches existing unknown orders.</p><h2>Add a shop</h2><form method='post' class='add-shop-form'><label>Shop <input name='name' required></label> <label>Links <select name='allows_multiple'><option value='0'>One link</option><option value='1'>Multiple links</option></select></label> <label>Suggested shipping (JPY) <input type='number' min='0' name='shipping_jpy'></label> <label>Website domains <input name='domains' placeholder='example.com'></label> <button>Add shop</button></form><h2 class='add-shop-heading'>Saved shops</h2><div class='shop-table-wrap'><table class='shop-table'><thead><tr><th>Shop</th><th>Links per order</th><th>Suggested shipping (JPY)</th><th>Website domains</th><th><span class='sr-only'>Actions</span></th></tr></thead><tbody>" + "".join(rows) + "</tbody></table></div>", title="Shop settings", active="shops")
 
     async def logout(request: Request):
         if not csrf(request):
