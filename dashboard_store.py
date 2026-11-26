@@ -24,6 +24,7 @@ class DashboardStore:
                 CREATE TABLE IF NOT EXISTS dashboard_orders (id INTEGER PRIMARY KEY AUTOINCREMENT, batch_token TEXT NOT NULL, order_date TEXT NOT NULL, line_name TEXT NOT NULL, dn_line TEXT NOT NULL, shop TEXT NOT NULL, shipping_jpy INTEGER, status TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS dashboard_products (id INTEGER PRIMARY KEY, order_id INTEGER NOT NULL REFERENCES dashboard_orders(id), name TEXT NOT NULL, link TEXT NOT NULL, price_jpy INTEGER NOT NULL, quantity INTEGER NOT NULL);
                 CREATE TABLE IF NOT EXISTS imported_orders (id INTEGER PRIMARY KEY, original_json TEXT NOT NULL, shop TEXT NOT NULL DEFAULT '', nominal TEXT NOT NULL DEFAULT '');
+                CREATE TABLE IF NOT EXISTS dashboard_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
             """)
             db.executemany("INSERT OR IGNORE INTO shops VALUES (?, ?, NULL)", DEFAULT_SHOPS.items())
 
@@ -35,6 +36,17 @@ class DashboardStore:
     def shops(self):
         with self.connect() as db:
             return db.execute("SELECT name, allows_multiple, shipping_jpy FROM shops ORDER BY name").fetchall()
+
+    def exchange_rate(self):
+        with self.connect() as db:
+            row = db.execute("SELECT value FROM dashboard_settings WHERE key = 'jpy_idr_rate'").fetchone()
+            return row[0] if row else None
+
+    def set_exchange_rate(self, rate):
+        from pricing import parse_rate
+        value = str(parse_rate(rate))
+        with self.connect() as db:
+            db.execute("INSERT INTO dashboard_settings VALUES ('jpy_idr_rate', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", (value,))
 
     def set_shop(self, name: str, allows_multiple: bool, shipping_jpy: Optional[int]):
         if not name.strip() or type(allows_multiple) is not bool or (shipping_jpy is not None and (type(shipping_jpy) is not int or shipping_jpy < 0)):

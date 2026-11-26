@@ -26,6 +26,7 @@ from dashboard_parser import parse_dashboard_order
 from dashboard_ui import page
 from link_extractor import PublicProductExtractor, ProductFetchError, UnsafeUrlError
 from order_parser import OrderParseError
+from pricing import calculate
 
 SESSION_SECONDS = 8 * 60 * 60
 
@@ -181,6 +182,47 @@ def create_app(db_path: str, credential: str, secret: str, secure: bool = True) 
         except (ValueError, KeyError, StopIteration, OverflowError):
             return HTMLResponse("Invalid order. Return to the preview and check all fields.", status_code=400)
 
+    async def calculator(request: Request):
+        if not valid(request):
+            return RedirectResponse("/login", status_code=303)
+        error = ""
+        result = ""
+        price = ""
+        quantity = "1"
+        if request.method == "POST":
+            if not csrf(request):
+                return HTMLResponse("Invalid request", status_code=403)
+            try:
+                form = await get_form(request)
+                action = form.get("action", [""])[0]
+                if action == "rate":
+                    store.set_exchange_rate(form.get("rate", [""])[0])
+                    return RedirectResponse("/admin/calculator", status_code=303)
+                if action != "calculate":
+                    raise ValueError("Invalid request.")
+                price = form.get("price", [""])[0].strip()
+                quantity = form.get("quantity", [""])[0].strip()
+                rate = store.exchange_rate()
+                if rate is None:
+                    raise ValueError("Set the exchange rate before calculating.")
+                items, fee, total = calculate(price, quantity, rate)
+                def rupiah(n):
+                    return f"Rp{n:,}".replace(",", ".")
+                result = f"<section aria-live='polite'><h2>Estimated total: {rupiah(total)}</h2><p>Item cost: {rupiah(items)} · Order fee: {rupiah(fee)} · Rate: Rp{html.escape(rate)} per ¥1</p><p>Shipping is not included.</p></section>"
+            except ValueError as exc:
+                error = f"<p role='alert'>{html.escape(str(exc))}</p>"
+        current_rate = store.exchange_rate()
+        safe_rate = html.escape(current_rate or "", quote=True)
+        content = ("<span class='eyebrow'>Pricing</span><h1>Jastip calculator</h1>"
+                   "<p class='intro'>Estimate an order in rupiah using your current JPY exchange rate. Shipping is not included.</p>"
+                   + error + "<h2>Exchange rate</h2><form method='post'><input type='hidden' name='action' value='rate'>"
+                   + f"<label>IDR per ¥1 <input name='rate' type='number' min='0.0001' step='0.0001' value='{safe_rate}' required></label>"
+                   + "<button>Save rate</button></form><h2>Estimate an item</h2><form method='post'><input type='hidden' name='action' value='calculate'>"
+                   + f"<label>Item price (JPY) <input name='price' type='number' min='0' step='1' value='{html.escape(price, quote=True)}' required></label>"
+                   + f"<label>Quantity <input name='quantity' type='number' min='1' max='10000' step='1' value='{html.escape(quantity, quote=True)}' required></label>"
+                   + "<p>Order fee: Rp15.000 per item</p><button>Calculate estimate</button></form>" + result)
+        return page(content, title="Jastip calculator", active="calculator")
+
     async def import_csv(request: Request):
         if not valid(request):
             return RedirectResponse("/login", status_code=303)
@@ -278,7 +320,7 @@ def create_app(db_path: str, credential: str, secret: str, secure: bool = True) 
         response.delete_cookie("admin_session", secure=secure, httponly=True, samesite="strict")
         return response
 
-    return Starlette(routes=[Route("/", public), Route("/login", login, methods=["GET", "POST"]), Route("/admin", admin), Route("/admin/shops", shops, methods=["GET", "POST"]), Route("/admin/intake", intake, methods=["GET", "POST"]), Route("/admin/import", import_csv, methods=["GET", "POST"]), Route("/admin/confirm", confirm, methods=["POST"]), Route("/admin/orders", orders, methods=["GET", "POST"]), Route("/logout", logout, methods=["POST"])])
+    return Starlette(routes=[Route("/", public), Route("/login", login, methods=["GET", "POST"]), Route("/admin", admin), Route("/admin/shops", shops, methods=["GET", "POST"]), Route("/admin/calculator", calculator, methods=["GET", "POST"]), Route("/admin/intake", intake, methods=["GET", "POST"]), Route("/admin/import", import_csv, methods=["GET", "POST"]), Route("/admin/confirm", confirm, methods=["POST"]), Route("/admin/orders", orders, methods=["GET", "POST"]), Route("/logout", logout, methods=["POST"])])
 
 
 def app_factory() -> Starlette:
