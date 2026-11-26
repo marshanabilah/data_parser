@@ -136,9 +136,10 @@ def test_order_records_review_tab_and_count(client):
     assert "Album" in review and "Photocard" in review
     update = {"kind": "imported", "id": "57", "shop": "Mercari", "nominal": "600", "view": "review"}
     response = browser.post("/admin/orders", data=update, headers=headers, follow_redirects=False)
-    assert response.headers["location"] == "/admin/orders?view=review"
+    assert response.headers["location"] == "/admin/orders?saved=1&view=review"
     review = browser.get(response.headers["location"]).text
     assert "Needs review <span class='review-count'>1</span>" in review
+    assert "Saved successfully" in review
     assert "Album" not in review and "Photocard" in review
     assert "Album" in browser.get("/admin/orders").text
 
@@ -154,6 +155,31 @@ def test_known_shop_without_price_is_not_in_shop_review(client):
     assert "Needs review <span class='review-count'>0</span>" in orders
     assert "Price missing or invalid" in orders
     assert "value='Mercari'" in orders
+
+
+def test_review_can_create_shop_and_match_other_orders(client):
+    browser, _, _ = client
+    headers = {"origin": "http://testserver"}
+    csv_text = ("Date,Order No.,DN Line,Items,Link,Nominal,Arrived Date,Status,Box\n"
+                "26/2,57,Bela,Album,https://paypayfleamarket.yahoo.co.jp/a,600,,Ordered,\n"
+                "27/2,58,Ani,Card,https://paypayfleamarket.yahoo.co.jp/b,700,,Ordered,\n")
+    browser.post("/login", data={"password": "correct horse"}, headers=headers)
+    browser.post("/admin/import", data={"csv": csv_text, "confirm": "yes"}, headers=headers)
+    payload = {"kind": "imported", "id": "57", "shop": "PayPay", "nominal": "600", "view": "review", "remember_domain": "yes"}
+    rejected = browser.post("/admin/orders", data=payload, headers=headers)
+    assert rejected.status_code == 400
+    assert "Choose whether it allows" in rejected.text
+    assert "PayPay" not in browser.get("/admin/shops").text
+    payload["new_rule"] = "0"
+    saved = browser.post("/admin/orders", data=payload, headers=headers)
+    assert "Saved successfully" in saved.text
+    assert "Needs review <span class='review-count'>0</span>" in saved.text
+    settings = browser.get("/admin/shops").text
+    assert "PayPay" in settings
+    assert "paypayfleamarket.yahoo.co.jp" in settings
+    orders = browser.get("/admin/orders").text
+    assert "<dialog id='order-57'" in orders
+    assert "value='PayPay'" in orders
 
 
 def test_admin_calculator_rate_persists_and_requires_login(client):

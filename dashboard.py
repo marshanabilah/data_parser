@@ -275,14 +275,15 @@ def create_app(db_path: str, credential: str, secret: str, secure: bool = True) 
             try:
                 form = await get_form(request)
                 if form.get("kind", [""])[0] == "imported":
-                    updated = store.update_imported(int(form["id"][0]), form["shop"][0], form["nominal"][0])
+                    updated = store.update_imported(int(form["id"][0]), form["shop"][0], form["nominal"][0], new_rule=form.get("new_rule", [""])[0], remember_domain=form.get("remember_domain", [""])[0] == "yes")
                 else:
                     updated = store.set_status(int(form["id"][0]), form["status"][0])
                 if not updated:
                     raise ValueError("Unknown order")
-            except (ValueError, KeyError):
-                return HTMLResponse("Invalid status update", status_code=400)
-            params = {}
+            except (ValueError, KeyError) as exc:
+                message = str(exc) if isinstance(exc, ValueError) else "A required field is missing."
+                return page(f"<h1>Could not save this order</h1><p role='alert'>{html.escape(message)}</p><p><a href='/admin/orders?view=review'>Back to orders</a></p>", title="Save problem", active="orders", status_code=400)
+            params = {"saved": "1"}
             if form.get("view", [""])[0] == "review":
                 params["view"] = "review"
             if form.get("q", [""])[0].strip():
@@ -303,7 +304,7 @@ def create_app(db_path: str, credential: str, secret: str, secure: bool = True) 
                 lines = "".join(f"<li>{esc(title)} — ¥{price} × {quantity} <a href='{esc(link)}' rel='noreferrer'>Product</a></li>" for title, link, price, quantity in products)
                 summary = products[0][0] + (f" + {len(products) - 1} more" if len(products) > 1 else "") if products else "No product"
                 options = "".join(f"<option{' selected' if state == status else ''}>{esc(state)}</option>" for state in STATUSES)
-                details = f"<details><summary>Details &amp; update</summary><div class='order-details'><p>Shop: {esc(shop)} · Shipping: {esc(shipping if shipping is not None else 'not set')} JPY</p><ul>{lines}</ul><form method='post'>{view_fields}<input type='hidden' name='id' value='{order_id}'><label>Status <select name='status'>{options}</select></label><button>Update status</button></form></div></details>"
+                details = f"<button type='button' class='open-order' data-dialog='order-{order_id}'>Details &amp; update</button><dialog id='order-{order_id}' aria-labelledby='title-{order_id}'><div class='dialog-heading'><h2 id='title-{order_id}'>Item #{order_id}</h2><button type='button' class='close-order' aria-label='Close'>×</button></div><div class='order-details'><p>Shop: {esc(shop)} · Shipping: {esc(shipping if shipping is not None else 'not set')} JPY</p><ul>{lines}</ul><form method='post'>{view_fields}<input type='hidden' name='id' value='{order_id}'><label>Status <select name='status'>{options}</select></label><button>Update status</button></form></div></dialog>"
                 result.append((order_id, f"<tr><td>#{order_id}</td><td>{esc(order_date)}</td><td>{esc(name)}</td><td>{esc(summary)}</td><td>{esc(status)}</td><td>{details}</td></tr>"))
         for order_id, row, shop, nominal in store.imported(query):
             needs_review = shop.strip().casefold() not in known_shops
@@ -312,7 +313,14 @@ def create_app(db_path: str, credential: str, secret: str, secure: bool = True) 
             details = "".join(f"<li><strong>{esc(key)}:</strong> {esc(row[key]) or '—'}</li>" for key in ("Order No.", "Date", "DN Line", "Items", "Link", "Nominal", "Arrived Date", "Status", "Box"))
             details += "".join(f"<li><strong>{esc(column['header'] or 'Extra column')}:</strong> {esc(column['value'])}</li>" for column in row.get("Extra columns", []) if column["value"])
             price_note = "<p>Price missing or invalid.</p>" if not valid_jpy(nominal) else ""
-            form = f"<details><summary>Details &amp; review</summary><div class='order-details'><p>Original sheet values</p><ul>{details}</ul>{price_note}<form method='post'>{view_fields}<input type='hidden' name='kind' value='imported'><input type='hidden' name='id' value='{order_id}'><label>Shop <input name='shop' value='{esc(shop)}' list='known-shops'></label><label>Price (JPY) <input name='nominal' value='{esc(nominal)}'></label><button>Save review</button></form></div></details>"
+            try:
+                from urllib.parse import urlsplit
+                parsed_link = urlsplit(row['Link'].strip())
+                host = parsed_link.hostname if parsed_link.scheme.lower() == 'https' and not parsed_link.username and not parsed_link.password else None
+            except ValueError:
+                host = None
+            remember = f"<label class='remember-domain'><input type='checkbox' name='remember_domain' value='yes' checked> Remember {esc(host)} for this shop and match other unassigned orders</label>" if host else ""
+            form = f"<button type='button' class='open-order' data-dialog='order-{order_id}'>Details &amp; review</button><dialog id='order-{order_id}' aria-labelledby='title-{order_id}'><div class='dialog-heading'><h2 id='title-{order_id}'>Item #{order_id}</h2><button type='button' class='close-order' aria-label='Close'>×</button></div><div class='order-details'><details class='original-values'><summary>Original sheet values</summary><ul>{details}</ul></details>{price_note}<form method='post'>{view_fields}<input type='hidden' name='kind' value='imported'><input type='hidden' name='id' value='{order_id}'><label>Shop <input name='shop' value='{esc(shop)}' list='known-shops'></label><label>If this shop is new, links per order <select name='new_rule'><option value=''>Choose for a new shop</option><option value='0'>One link</option><option value='1'>Multiple links</option></select></label>{remember}<label>Price (JPY) <input name='nominal' value='{esc(nominal)}'></label><button>Save review</button></form></div></dialog>"
             review_text = "Needs review" if needs_review else "Shop known"
             price_flag = "<br><small>Price missing or invalid</small>" if not valid_jpy(nominal) else ""
             result.append((order_id, f"<tr><td>#{order_id}</td><td>{esc(row['Date']) or '—'}</td><td>{esc(row['DN Line'])}</td><td>{esc(row['Items']) or '—'}</td><td><span class='review-label'>{review_text}</span><br>{esc(row['Status'])}{price_flag}</td><td>{form}</td></tr>"))
@@ -324,7 +332,9 @@ def create_app(db_path: str, credential: str, secret: str, secure: bool = True) 
         search_form = f"<form class='order-search' method='get'>{'<input type=hidden name=view value=review>' if review_only else ''}<label>Search by item ID or LINE display name <input name='q' value='{esc(query)}'></label><button>Search</button></form>"
         table = "<div class='orders-table-wrap'><table class='orders-table'><thead><tr><th>Item ID</th><th>Date</th><th>LINE name</th><th>Item</th><th>Status</th><th>Details</th></tr></thead><tbody>" + "".join(row for _, row in result) + "</tbody></table></div>" if result else ""
         shop_options = "".join(f"<option value='{esc(name)}'></option>" for name, _, _ in store.shops())
-        return page("<span class='eyebrow'>Track your items</span><h1>Orders</h1><p class='intro'>Find an order and update its journey. Needs review shows shops not yet in your shop settings.</p>" + tabs + search_form + table + empty + f"<datalist id='known-shops'>{shop_options}</datalist>", title="Orders", active="orders")
+        saved_message = "<p class='save-notice' role='status'>Saved successfully. The review count has been updated.</p>" if request.query_params.get("saved") == "1" else ""
+        dialog_script = "<script>document.addEventListener('click', function(event) { const open = event.target.closest('[data-dialog]'); if (open) document.getElementById(open.dataset.dialog).showModal(); const close = event.target.closest('.close-order'); if (close) close.closest('dialog').close(); });</script>"
+        return page("<span class='eyebrow'>Track your items</span><h1>Orders</h1><p class='intro'>Find an order and update its journey. Needs review shows shops not yet in your shop settings.</p>" + saved_message + tabs + search_form + table + empty + f"<datalist id='known-shops'>{shop_options}</datalist>" + dialog_script, title="Orders", active="orders")
 
     async def shops(request: Request):
         if not valid(request):

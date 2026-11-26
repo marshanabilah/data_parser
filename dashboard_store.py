@@ -171,13 +171,44 @@ class DashboardStore:
                 result.append((order_id, row, shop, nominal))
         return result
 
-    def update_imported(self, order_id, shop, nominal):
+    def update_imported(self, order_id, shop, nominal, new_rule=None, remember_domain=False):
         if len(shop) > 100 or len(nominal) > 100:
             raise ValueError("Shop or price is too long")
         if nominal.strip() and not valid_jpy(nominal):
             raise ValueError("Price must be a whole-yen amount or blank")
         with self.connect() as db:
-            return db.execute("UPDATE imported_orders SET shop = ?, nominal = ? WHERE id = ?", (shop.strip(), nominal.strip(), order_id)).rowcount == 1
+            record = db.execute("SELECT original_json FROM imported_orders WHERE id = ?", (order_id,)).fetchone()
+            if not record:
+                return False
+            name = shop.strip()
+            known = db.execute("SELECT name FROM shops WHERE name = ?", (name,)).fetchone() if name else None
+            if name and not known:
+                if new_rule not in ("0", "1"):
+                    raise ValueError("This is a new shop. Choose whether it allows one link or multiple links.")
+                db.execute("INSERT INTO shops (name, allows_multiple, shipping_jpy) VALUES (?, ?, NULL)", (name, int(new_rule)))
+                known = (name,)
+            if known:
+                name = known[0]
+            if remember_domain and name:
+                link = json.loads(record[0]).get("Link", "")
+                try:
+                    url = urlsplit(link.strip())
+                    domain = (url.hostname or "").lower().rstrip(".")
+                    if url.scheme.lower() != "https" or url.username is not None or url.password is not None:
+                        raise ValueError
+                except ValueError as exc:
+                    raise ValueError("This order has no valid HTTPS website to remember.") from exc
+                domains = db.execute("SELECT domain, shop FROM shop_domains").fetchall()
+                owner = self._matching_shop(link, domains)
+                if owner and owner.casefold() != name.casefold():
+                    raise ValueError("This website is already associated with another shop. Check Shop settings.")
+                if not owner:
+                    existing = [domain for domain, shop_name in domains if shop_name.casefold() == name.casefold()]
+                    self._set_shop_domains(db, name, [*existing, domain])
+            db.execute("UPDATE imported_orders SET shop = ?, nominal = ? WHERE id = ?", (name, nominal.strip(), order_id))
+            if remember_domain:
+                self._fill_missing_shops(db)
+            return True
 
     def search(self, query: str = ""):
         with self.connect() as db:
