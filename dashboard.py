@@ -23,7 +23,7 @@ from starlette.routing import Route
 from dashboard_store import DashboardStore, valid_jpy
 from dashboard_orders import OrderRecord, ProductLine, STATUSES
 from dashboard_parser import parse_dashboard_order
-from dashboard_ui import page
+from dashboard_ui import page as render_page
 from link_extractor import PublicProductExtractor, ProductFetchError, UnsafeUrlError
 from order_parser import OrderParseError
 from pricing import calculate
@@ -47,6 +47,9 @@ def create_app(db_path: str, credential: str, secret: str, secure: bool = True) 
     with sqlite3.connect(db_path) as db:
         db.execute("CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, expires REAL, credential TEXT)")
     store = DashboardStore(db_path)
+
+    def page(content, **kwargs):
+        return render_page(content, rate=store.exchange_rate(), **kwargs)
 
     def token_hash(token: str) -> str:
         return hmac.new(secret.encode(), token.encode(), hashlib.sha256).hexdigest()
@@ -195,9 +198,6 @@ def create_app(db_path: str, credential: str, secret: str, secure: bool = True) 
             try:
                 form = await get_form(request)
                 action = form.get("action", [""])[0]
-                if action == "rate":
-                    store.set_exchange_rate(form.get("rate", [""])[0])
-                    return RedirectResponse("/admin/calculator", status_code=303)
                 if action != "calculate":
                     raise ValueError("Invalid request.")
                 price = form.get("price", [""])[0].strip()
@@ -211,17 +211,35 @@ def create_app(db_path: str, credential: str, secret: str, secure: bool = True) 
                 result = f"<section aria-live='polite'><h2>Estimated total: {rupiah(total)}</h2><p>Item cost: {rupiah(items)} · Order fee: {rupiah(fee)} · Rate: Rp{html.escape(rate)} per ¥1</p><p>Shipping is not included.</p></section>"
             except ValueError as exc:
                 error = f"<p role='alert'>{html.escape(str(exc))}</p>"
-        current_rate = store.exchange_rate()
-        safe_rate = html.escape(current_rate or "", quote=True)
         content = ("<span class='eyebrow'>Pricing</span><h1>Jastip calculator</h1>"
                    "<p class='intro'>Estimate an order in rupiah using your current JPY exchange rate. Shipping is not included.</p>"
-                   + error + "<h2>Exchange rate</h2><form method='post'><input type='hidden' name='action' value='rate'>"
-                   + f"<label>IDR per ¥1 <input name='rate' type='number' min='0.0001' step='0.0001' value='{safe_rate}' required></label>"
-                   + "<button>Save rate</button></form><h2>Estimate an item</h2><form method='post'><input type='hidden' name='action' value='calculate'>"
+                   + error + "<h2>Estimate an item</h2><form method='post'><input type='hidden' name='action' value='calculate'>"
                    + f"<label>Item price (JPY) <input name='price' type='number' min='0' step='1' value='{html.escape(price, quote=True)}' required></label>"
                    + f"<label>Quantity <input name='quantity' type='number' min='1' max='10000' step='1' value='{html.escape(quantity, quote=True)}' required></label>"
                    + "<p>Order fee: Rp15.000 per item</p><button>Calculate estimate</button></form>" + result)
         return page(content, title="Jastip calculator", active="calculator")
+
+    async def exchange_rate(request: Request):
+        if not valid(request):
+            return RedirectResponse("/login", status_code=303)
+        error = ""
+        if request.method == "POST":
+            if not csrf(request):
+                return HTMLResponse("Invalid request", status_code=403)
+            try:
+                form = await get_form(request)
+                store.set_exchange_rate(form.get("rate", [""])[0])
+                return RedirectResponse("/admin/rate", status_code=303)
+            except ValueError as exc:
+                error = f"<p role='alert'>{html.escape(str(exc))}</p>"
+        rate = store.exchange_rate()
+        current = f"Current saved rate: Rp{html.escape(rate)} per ¥1." if rate is not None else "No rate has been saved yet."
+        content = ("<span class='eyebrow'>Pricing settings</span><h1>Exchange rate</h1>"
+                   f"<p class='intro'>{current} Update this whenever your rate changes.</p>" + error
+                   + "<form method='post'><label>IDR per ¥1 <input name='rate' type='number' min='0.0001' step='0.0001' "
+                   + f"value='{html.escape(rate or '', quote=True)}' required></label><button>Save rate</button></form>"
+                   + "<p><a href='/admin/calculator'>Go to calculator</a></p>")
+        return page(content, title="Exchange rate")
 
     async def import_csv(request: Request):
         if not valid(request):
@@ -320,7 +338,7 @@ def create_app(db_path: str, credential: str, secret: str, secure: bool = True) 
         response.delete_cookie("admin_session", secure=secure, httponly=True, samesite="strict")
         return response
 
-    return Starlette(routes=[Route("/", public), Route("/login", login, methods=["GET", "POST"]), Route("/admin", admin), Route("/admin/shops", shops, methods=["GET", "POST"]), Route("/admin/calculator", calculator, methods=["GET", "POST"]), Route("/admin/intake", intake, methods=["GET", "POST"]), Route("/admin/import", import_csv, methods=["GET", "POST"]), Route("/admin/confirm", confirm, methods=["POST"]), Route("/admin/orders", orders, methods=["GET", "POST"]), Route("/logout", logout, methods=["POST"])])
+    return Starlette(routes=[Route("/", public), Route("/login", login, methods=["GET", "POST"]), Route("/admin", admin), Route("/admin/shops", shops, methods=["GET", "POST"]), Route("/admin/calculator", calculator, methods=["GET", "POST"]), Route("/admin/rate", exchange_rate, methods=["GET", "POST"]), Route("/admin/intake", intake, methods=["GET", "POST"]), Route("/admin/import", import_csv, methods=["GET", "POST"]), Route("/admin/confirm", confirm, methods=["POST"]), Route("/admin/orders", orders, methods=["GET", "POST"]), Route("/logout", logout, methods=["POST"])])
 
 
 def app_factory() -> Starlette:

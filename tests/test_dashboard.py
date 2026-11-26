@@ -128,10 +128,15 @@ def test_admin_calculator_rate_persists_and_requires_login(client):
     browser.post("/login", data={"password": "correct horse"}, headers=headers)
     missing = browser.post("/admin/calculator", data={"action": "calculate", "price": "1000", "quantity": "2"}, headers=headers)
     assert "Set the exchange rate" in missing.text
-    assert browser.post("/admin/calculator", data={"action": "rate", "rate": "110"}, headers=headers, follow_redirects=False).status_code == 303
+    assert "Not set" in browser.get("/admin/orders").text
+    assert browser.post("/admin/rate", data={"rate": "110"}, headers=headers, follow_redirects=False).status_code == 303
     result = browser.post("/admin/calculator", data={"action": "calculate", "price": "1000", "quantity": "2"}, headers=headers)
     assert "Rp250.000" in result.text
     assert "Shipping is not included" in result.text
     reopened = TestClient(create_app(path, credential, "s" * 32, secure=False))
     reopened.post("/login", data={"password": "correct horse"}, headers=headers)
-    assert "value='110'" in reopened.get("/admin/calculator").text
+    assert "Rp110 / ¥1" in reopened.get("/admin/calculator").text
+    assert "Rp110 / ¥1" in reopened.get("/admin/orders").text
+    assert "value='110'" in reopened.get("/admin/rate").text
+    assert browser.post("/admin/rate", data={"rate": "-1"}, headers=headers).status_code == 200
+    assert "Rp110 / ¥1" in browser.get("/admin").text

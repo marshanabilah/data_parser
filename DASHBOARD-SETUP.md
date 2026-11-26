@@ -8,7 +8,7 @@ Set `OPENROUTER_API_KEY` in the server environment to use order parsing. The das
 
 For older sheet data, export the `Orders` tab as CSV and use Import CSV. Review the rows before confirmation. `DN Line` is the LINE display name, and original order IDs, dates, statuses, arrival dates, and box values are retained. Imported orders need review until shop and JPY price are entered in Orders. If an ID already exists, the entire import is rejected; use a clean database or resolve the collision before retrying. Import does not send CSV data to OpenRouter. The original imported status is displayed as received; status editing for imported records is not yet available.
 
-Use Calculator to save the current IDR-per-JPY exchange rate and estimate `(item price × rate + Rp15,000) × quantity`. The item-cost subtotal is rounded to the nearest rupiah, with half a rupiah rounded up. The estimate excludes shipping and does not alter saved orders.
+Use the rate control at the top right of an admin page to set or edit the saved IDR-per-JPY exchange rate. Calculator estimates `(item price × rate + Rp15,000) × quantity`. The item-cost subtotal is rounded to the nearest rupiah, with half a rupiah rounded up. The estimate excludes shipping and does not alter saved orders.
 
 To reset the password, generate a new hash and replace `ADMIN_PASSWORD_HASH`, then restart the application. Previous sessions become invalid. The SQLite session database defaults to `dashboard.sqlite3`; set `DASHBOARD_DB` to change its path.
 
