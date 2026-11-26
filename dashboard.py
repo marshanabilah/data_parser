@@ -22,6 +22,7 @@ from starlette.routing import Route
 
 from dashboard_store import DashboardStore
 from dashboard_orders import OrderRecord, ProductLine, STATUSES
+from dashboard_ui import page
 from link_extractor import PublicProductExtractor, ProductFetchError, UnsafeUrlError
 from order_parser import ClaudeOrderMessageInterpreter, OrderParseError, parse_order_message
 
@@ -61,7 +62,7 @@ def create_app(db_path: str, credential: str, secret: str, secure: bool = True) 
         return bool(origin and origin == str(request.base_url).rstrip("/"))
 
     async def public(request: Request):
-        return HTMLResponse("<h1>Jastip</h1><p>Customer tools are coming soon.</p>")
+        return page("<h1>Something lovely is on its way.</h1><p>Customer order lookup and price estimates are coming soon.</p><a href='/login'>Admin sign in</a>", title="Welcome", public=True)
 
     async def login(request: Request):
         if request.method == "POST":
@@ -81,13 +82,15 @@ def create_app(db_path: str, credential: str, secret: str, secure: bool = True) 
                 response = RedirectResponse("/admin", status_code=303)
                 response.set_cookie("admin_session", token, max_age=SESSION_SECONDS, httponly=True, secure=secure, samesite="strict")
                 return response
-            return HTMLResponse("<p>Incorrect password.</p><a href='/login'>Try again</a>", status_code=401)
-        return HTMLResponse("<h1>Admin sign in</h1><form method='post'><label>Password <input name='password' type='password' autocomplete='current-password' required></label><button>Sign in</button></form>")
+            return page("<h1>Let's try that again.</h1><p>That password didn't match.</p><a href='/login'>Back to sign in</a>", title="Sign in", status_code=401, public=True)
+        return page("<h1>Welcome back.</h1><p>Sign in to manage your jastip orders.</p><form method='post'><label>Password <input name='password' type='password' autocomplete='current-password' required></label><button>Sign in</button></form>", title="Sign in", public=True)
 
     async def admin(request: Request):
         if not valid(request):
             return RedirectResponse("/login", status_code=303)
-        return HTMLResponse("<h1>Admin dashboard</h1><p><a href='/admin/shops'>Shop settings</a> · <a href='/admin/intake'>Parse an order</a> · <a href='/admin/orders'>Orders</a></p><form action='/logout' method='post'><button>Sign out</button></form>")
+        count = len(store.search())
+        content = f"<span class='eyebrow'>Your workspace</span><h1>Good to see you.</h1><p class='intro'>A little home for all your jastip orders, from purchase to delivery.</p><div class='banner'><div><span class='eyebrow'>Ready when you are</span><h2>Let's get your orders organised.</h2><p>Paste an order collection and check the details before saving.</p></div><a class='button' href='/admin/intake'>Parse an order</a></div><div class='section-title'><div><span class='eyebrow'>At a glance</span><h2>Your order desk</h2></div><span class='hint'>{count} saved {'record' if count == 1 else 'records'}</span></div><div class='actions'><a class='action-card' href='/admin/orders'><span class='tag'>Track &amp; update</span><h2>Orders</h2><p>Find an item and follow its journey from Japan to Indonesia.</p><span class='go'>View orders →</span></a><a class='action-card' href='/admin/shops'><span class='tag'>Your preferences</span><h2>Shop settings</h2><p>Set link rules and suggested shipping fees for each shop.</p><span class='go'>Manage shops →</span></a></div><form action='/logout' method='post'><button>Sign out</button></form>"
+        return page(content, title="Overview", active="overview")
 
     async def get_form(request: Request):
         if request.headers.get("content-type", "").split(";")[0] != "application/x-www-form-urlencoded":
@@ -102,7 +105,7 @@ def create_app(db_path: str, credential: str, secret: str, secure: bool = True) 
             return RedirectResponse("/login", status_code=303)
         if request.method == "GET":
             options = "".join(f"<option>{html.escape(name)}</option>" for name, _, _ in store.shops())
-            return HTMLResponse("<h1>Parse an order</h1><p>Paste one customer's order from one shop. For multi-link shops, links in this submission will share one record. Submit separate orders separately.</p><form method='post'><label>LINE display name <input name='line_name' required></label><label>Shop <select name='shop'>" + options + "</select></label><label>Order collection <textarea name='message' required></textarea></label><button>Parse and review</button></form><p><a href='/admin'>Back</a></p>")
+            return page("<span class='eyebrow'>New order</span><h1>Let's add an order.</h1><p class='intro'>Paste one customer's order from one shop. For multi-link shops, links in this submission share one record. Submit separate orders separately.</p><form method='post'><label>LINE display name <input name='line_name' required></label><label>Shop <select name='shop'>" + options + "</select></label><label>Order collection <textarea name='message' required></textarea></label><button>Parse and review</button></form>", title="Parse an order", active="intake")
         if not csrf(request):
             return HTMLResponse("Invalid request", status_code=403)
         try:
@@ -141,7 +144,7 @@ def create_app(db_path: str, credential: str, secret: str, secure: bool = True) 
             for item, name, yen in details:
                 warning = "<p>This link already exists in an order.</p>" if store.has_link(item.link) else ""
                 fields += f"<fieldset><legend>Product</legend>{warning}<label>DN Line <input name='dn' value='{esc(item.dn_line)}' required></label><label>Link <input name='link' value='{esc(item.link)}' readonly></label><label>Name <input name='name' value='{esc(name)}' required></label><label>Price (JPY) <input name='price' type='number' min='0' value='{esc(yen)}' required></label><label>Quantity <input name='quantity' type='number' min='1' value='1' required></label></fieldset>"
-            return HTMLResponse("<h1>Review order</h1><p>Check all fields before saving.</p><form method='post' action='/admin/confirm'>" + fields + "<button>Confirm and save</button></form><a href='/admin/intake'>Cancel</a>")
+            return page("<span class='eyebrow'>Almost there</span><h1>Review your order.</h1><p class='intro'>Check the details before saving.</p><form method='post' action='/admin/confirm'>" + fields + "<button>Confirm and save</button></form><a href='/admin/intake'>Cancel</a>", title="Review order", active="intake")
         except (ValueError, OrderParseError, anthropic.APIError):
             return HTMLResponse("Could not parse the order. Check the order details and API configuration, then try again.", status_code=400)
 
@@ -167,7 +170,7 @@ def create_app(db_path: str, credential: str, secret: str, secure: bool = True) 
             groups = [(dns[0], tuple(products))] if setting[1] else [(dn, (product,)) for dn, product in zip(dns, products)]
             records = [OrderRecord(date.fromisoformat(one("order_date")), one("line_name"), dn, shop, bool(setting[1]), shipping, lines) for dn, lines in groups]
             ids = store.save(one("token"), records)
-            return HTMLResponse("<h1>Saved</h1><p>Item IDs: " + ", ".join(map(str, ids)) + "</p><a href='/admin/orders'>View orders</a>")
+            return page("<span class='eyebrow'>All done</span><h1>Order saved.</h1><p>Item IDs: " + ", ".join(map(str, ids)) + "</p><a class='button' href='/admin/orders'>View orders</a>", title="Order saved", active="orders")
         except (ValueError, KeyError, StopIteration, OverflowError):
             return HTMLResponse("Invalid order. Return to the preview and check all fields.", status_code=400)
 
@@ -192,7 +195,8 @@ def create_app(db_path: str, credential: str, secret: str, secure: bool = True) 
             lines = "".join(f"<li>{escape(title)} — ¥{price} × {quantity} <a href='{html.escape(link, quote=True)}' rel='noreferrer'>Product</a></li>" for title, link, price, quantity in store.products(order_id))
             options = "".join(f"<option{' selected' if state == status else ''}>{escape(state)}</option>" for state in STATUSES)
             result.append(f"<section><h2>Item {order_id} — {escape(shop)}</h2><p>{escape(order_date)} · {escape(name)} · {escape(dn)} · Shipping: {escape(shipping if shipping is not None else 'not set')} JPY</p><ul>{lines}</ul><form method='post'><input type='hidden' name='id' value='{order_id}'><label>Status <select name='status'>{options}</select></label><button>Update</button></form></section>")
-        return HTMLResponse("<h1>Orders</h1><form><label>Search <input name='q' value='" + html.escape(query, quote=True) + "'></label><button>Search</button></form>" + "".join(result) + "<p><a href='/admin'>Back</a></p>")
+        empty = "<div class='empty-state'>No matching orders yet. Try another search or add an order.</div>" if not result else ""
+        return page("<span class='eyebrow'>Track your items</span><h1>Orders</h1><p class='intro'>Find an order and update its journey.</p><form><label>Search by item ID, LINE name, or DN Line <input name='q' value='" + html.escape(query, quote=True) + "'></label><button>Search</button></form>" + "".join(result) + empty, title="Orders", active="orders")
 
     async def shops(request: Request):
         if not valid(request):
@@ -223,7 +227,7 @@ def create_app(db_path: str, credential: str, secret: str, secure: bool = True) 
             selected_multi = " selected" if multiple else ""
             value = "" if fee is None else str(fee)
             rows.append(f"<form method='post'><label>Shop <input name='name' value='{safe_name}' required></label> <label>Links <select name='allows_multiple'><option value='0'{selected_single}>One</option><option value='1'{selected_multi}>Multiple</option></select></label> <label>Suggested shipping (JPY) <input type='number' min='0' name='shipping_jpy' value='{value}'></label> <button>Save</button></form>")
-        return HTMLResponse("<h1>Shop settings</h1><p><a href='/admin'>Back to dashboard</a></p>" + "".join(rows) + "<h2>Add shop</h2><form method='post'><label>Shop <input name='name' required></label> <label>Links <select name='allows_multiple'><option value='0'>One</option><option value='1'>Multiple</option></select></label> <label>Suggested shipping (JPY) <input type='number' min='0' name='shipping_jpy'></label> <button>Add shop</button></form>")
+        return page("<span class='eyebrow'>Your preferences</span><h1>Shop settings</h1><p class='intro'>Choose how many links each shop allows and set an optional suggested shipping fee.</p>" + "".join(rows) + "<h2>Add a shop</h2><form method='post'><label>Shop <input name='name' required></label> <label>Links <select name='allows_multiple'><option value='0'>One</option><option value='1'>Multiple</option></select></label> <label>Suggested shipping (JPY) <input type='number' min='0' name='shipping_jpy'></label> <button>Add shop</button></form>", title="Shop settings", active="shops")
 
     async def logout(request: Request):
         if not csrf(request):
